@@ -9,6 +9,7 @@ use opencv::{
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
@@ -34,11 +35,11 @@ struct Args {
     #[arg(default_value = ".")]
     directory: PathBuf,
 
-    #[arg(long, default_value_t = 1280)]
-    width: i32,
+    #[arg(long)]
+    width: Option<i32>,
 
-    #[arg(long, default_value_t = 720)]
-    height: i32,
+    #[arg(long)]
+    height: Option<i32>,
 
     #[arg(long, default_value_t = 0.0)]
     clip_seconds: f64,
@@ -221,6 +222,8 @@ struct QuadPlayer {
     window_name: String,
     pool: VideoPool,
     rng: rand::rngs::StdRng,
+    width: i32,
+    height: i32,
     slots: Vec<SlotState>,
     paused: bool,
     show_help: bool,
@@ -229,7 +232,7 @@ struct QuadPlayer {
 }
 
 impl QuadPlayer {
-    fn new(args: Args, entries: Vec<VideoEntry>) -> Result<Self> {
+    fn new(args: Args, entries: Vec<VideoEntry>, width: i32, height: i32) -> Result<Self> {
         let fullscreen = args.fullscreen;
         let pool = VideoPool::new(entries, !args.no_shuffle, args.seed);
         let rng = if let Some(s) = args.seed {
@@ -244,13 +247,15 @@ impl QuadPlayer {
         }
 
         let blank_frame =
-            Mat::new_rows_cols_with_default(args.height, args.width, core::CV_8UC3, Dracula::BG)?;
+            Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::BG)?;
 
         Ok(Self {
             args,
             window_name: "quadplay".to_string(),
             pool,
             rng,
+            width,
+            height,
             slots,
             paused: false,
             show_help: true,
@@ -261,7 +266,7 @@ impl QuadPlayer {
 
     fn run(&mut self) -> Result<()> {
         highgui::named_window(&self.window_name, highgui::WINDOW_NORMAL)?;
-        highgui::resize_window(&self.window_name, self.args.width, self.args.height)?;
+        highgui::resize_window(&self.window_name, self.width, self.height)?;
         self.apply_window_mode()?;
 
         for i in 0..4 {
@@ -347,7 +352,7 @@ impl QuadPlayer {
 
         highgui::set_window_property(&self.window_name, highgui::WND_PROP_FULLSCREEN, mode)?;
         if !self.fullscreen {
-            highgui::resize_window(&self.window_name, self.args.width, self.args.height)?;
+            highgui::resize_window(&self.window_name, self.width, self.height)?;
         }
         Ok(())
     }
@@ -505,8 +510,8 @@ impl QuadPlayer {
     }
 
     fn compose_frame(&self) -> Result<Mat> {
-        let tile_width = self.args.width / 2;
-        let tile_height = self.args.height / 2;
+        let tile_width = self.width / 2;
+        let tile_height = self.height / 2;
         let mut canvas = self.blank_frame.clone();
 
         for i in 0..4 {
@@ -532,7 +537,7 @@ impl QuadPlayer {
         imgproc::line(
             &mut canvas,
             Point::new(tile_width, 0),
-            Point::new(tile_width, self.args.height),
+            Point::new(tile_width, self.height),
             Dracula::DIVIDER,
             2,
             imgproc::LINE_8,
@@ -541,7 +546,7 @@ impl QuadPlayer {
         imgproc::line(
             &mut canvas,
             Point::new(0, tile_height),
-            Point::new(self.args.width, tile_height),
+            Point::new(self.width, tile_height),
             Dracula::DIVIDER,
             2,
             imgproc::LINE_8,
@@ -829,9 +834,60 @@ fn main() -> Result<()> {
         anyhow::bail!("No video files found in {:?}", args.directory);
     }
 
-    let mut player = QuadPlayer::new(args, entries)?;
+    let (width, height) = resolve_dimensions(&args)?;
+    let mut player = QuadPlayer::new(args, entries, width, height)?;
     player.run()?;
     Ok(())
+}
+
+fn resolve_dimensions(args: &Args) -> Result<(i32, i32)> {
+    let default_width = 1280;
+    let default_height = 720;
+
+    if args.fullscreen {
+        let display = detect_display_dimensions().unwrap_or((default_width, default_height));
+        let width = args.width.unwrap_or(display.0);
+        let height = args.height.unwrap_or(display.1);
+        return Ok((width, height));
+    }
+
+    Ok((
+        args.width.unwrap_or(default_width),
+        args.height.unwrap_or(default_height),
+    ))
+}
+
+fn detect_display_dimensions() -> Result<(i32, i32)> {
+    let output = Command::new("xdpyinfo")
+        .output()
+        .context("Failed to query display dimensions with xdpyinfo")?;
+
+    if !output.status.success() {
+        anyhow::bail!("xdpyinfo exited with status {}", output.status);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("dimensions:") {
+            let dimensions = rest.trim();
+            if let Some((width, height)) = dimensions.split_once('x') {
+                let width = width
+                    .trim()
+                    .parse::<i32>()
+                    .context("Failed to parse display width")?;
+                let height = height
+                    .split_whitespace()
+                    .next()
+                    .context("Missing display height")?
+                    .parse::<i32>()
+                    .context("Failed to parse display height")?;
+                return Ok((width, height));
+            }
+        }
+    }
+
+    anyhow::bail!("Could not find display dimensions in xdpyinfo output")
 }
 
 #[cfg(test)]
