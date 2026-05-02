@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -d '' staged_rust_files < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
+
+if [ "${#staged_rust_files[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+echo "Running rustfmt on staged Rust files..."
+rustfmt "${staged_rust_files[@]}"
+git add -- "${staged_rust_files[@]}"
