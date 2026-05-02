@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use opencv::{
     core::{self, Mat, Point, Rect, Scalar, Size},
     highgui, imgproc,
@@ -54,11 +54,43 @@ struct Args {
 
     #[arg(long, help = "Start in full-screen mode")]
     fullscreen: bool,
+
+    #[arg(long, value_enum, default_value_t = TransitionMode::Fade)]
+    transition: TransitionMode,
+
+    #[arg(
+        long,
+        default_value_t = 300,
+        help = "Transition duration in milliseconds"
+    )]
+    transition_ms: u64,
 }
 
 #[derive(Clone, Debug)]
 struct VideoEntry {
     path: PathBuf,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum TransitionMode {
+    Cut,
+    Fade,
+}
+
+impl TransitionMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Cut => Self::Fade,
+            Self::Fade => Self::Cut,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cut => "CUT",
+            Self::Fade => "FADE",
+        }
+    }
 }
 
 fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
@@ -144,6 +176,8 @@ struct SlotState {
     entry: Option<VideoEntry>,
     capture: Option<videoio::VideoCapture>,
     frame: Option<Mat>,
+    transition_from: Option<Mat>,
+    transition_started_at: Option<Instant>,
     fps: f64,
     frame_index: i32,
     clip_start_frame: i32,
@@ -158,6 +192,8 @@ impl SlotState {
             entry: None,
             capture: None,
             frame: None,
+            transition_from: None,
+            transition_started_at: None,
             fps: 30.0,
             frame_index: 0,
             clip_start_frame: 0,
@@ -294,6 +330,9 @@ impl QuadPlayer {
                 self.fullscreen = !self.fullscreen;
                 self.apply_window_mode()?;
             }
+            't' => {
+                self.args.transition = self.args.transition.next();
+            }
             _ => {}
         }
         Ok(true)
@@ -327,6 +366,7 @@ impl QuadPlayer {
     }
 
     fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
+        let previous_frame = self.slots[slot_index].frame.clone();
         self.release_slot(slot_index)?;
         let attempts = self.pool.entries.len().max(1);
         let exclude = self.current_paths(Some(slot_index));
@@ -369,10 +409,20 @@ impl QuadPlayer {
             slot.clip_start_frame = clip_start_frame;
             slot.clip_end_frame = clip_end_frame;
             slot.frame = None;
+            slot.transition_from = None;
+            slot.transition_started_at = None;
             slot.next_frame_at = Some(Instant::now());
 
             self.read_next_frame(slot_index, false)?;
             if self.slots[slot_index].frame.is_some() {
+                if self.args.transition == TransitionMode::Fade
+                    && self.args.transition_ms > 0
+                    && previous_frame.is_some()
+                {
+                    let slot = &mut self.slots[slot_index];
+                    slot.transition_from = previous_frame.clone();
+                    slot.transition_started_at = Some(Instant::now());
+                }
                 return Ok(());
             }
             self.release_slot(slot_index)?;
@@ -386,6 +436,8 @@ impl QuadPlayer {
         slot.entry = None;
         slot.capture = None;
         slot.frame = None;
+        slot.transition_from = None;
+        slot.transition_started_at = None;
         slot.frame_index = 0;
         slot.clip_start_frame = 0;
         slot.clip_end_frame = None;
@@ -468,6 +520,8 @@ impl QuadPlayer {
                 self.show_help,
                 self.paused,
                 self.fullscreen,
+                self.args.transition,
+                self.args.transition_ms,
             )?;
 
             let roi = Rect::new(x0, y0, tile_width, tile_height);
@@ -505,12 +559,15 @@ fn render_slot(
     show_help: bool,
     paused: bool,
     fullscreen: bool,
+    transition: TransitionMode,
+    transition_ms: u64,
 ) -> Result<Mat> {
     let mut canvas = Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::PANEL)?;
 
     if let Some(frame) = &slot.frame {
-        let fitted = fit_frame(frame, width, height)?;
-        fitted.copy_to(&mut canvas)?;
+        let display_frame =
+            render_transition_frame(slot, frame, width, height, transition, transition_ms)?;
+        display_frame.copy_to(&mut canvas)?;
     }
 
     imgproc::rectangle(
@@ -575,6 +632,16 @@ fn render_slot(
         1,
     )?;
 
+    let transition_text = format!("transition {}", transition.label());
+    put_text(
+        &mut canvas,
+        &transition_text,
+        Point::new(width - 170, 64),
+        0.42,
+        Dracula::MUTED,
+        1,
+    )?;
+
     let state_chip = if paused { "PAUSED" } else { "LIVE" };
     let state_color = if paused {
         Dracula::WARNING
@@ -613,7 +680,7 @@ fn render_slot(
     } else if show_help {
         let fullscreen_hint = if fullscreen { "window" } else { "full" };
         let help_text = format!(
-            "1-4 swap  space pause  c all  r reshuffle  f {} screen  h hide  q quit",
+            "1-4 swap  space pause  c all  r reshuffle  t transition  f {} screen  h hide  q quit",
             fullscreen_hint
         );
         put_text(
@@ -646,16 +713,16 @@ fn ellipsize_middle(text: &str, max_chars: usize) -> String {
     format!("{}...{}", start, end)
 }
 
-fn fit_frame(frame: &Mat, width: i32, height: i32) -> Result<Mat> {
+fn fill_frame(frame: &Mat, width: i32, height: i32) -> Result<Mat> {
     let size = frame.size()?;
     if size.width == 0 || size.height == 0 {
         return Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::PANEL)
             .context("Failed to create empty mat");
     }
 
-    let scale = (width as f64 / size.width as f64).min(height as f64 / size.height as f64);
-    let resized_width = (size.width as f64 * scale) as i32;
-    let resized_height = (size.height as f64 * scale) as i32;
+    let scale = (width as f64 / size.width as f64).max(height as f64 / size.height as f64);
+    let resized_width = ((size.width as f64 * scale).round() as i32).max(width);
+    let resized_height = ((size.height as f64 * scale).round() as i32).max(height);
 
     let mut resized = Mat::default();
     imgproc::resize(
@@ -664,18 +731,51 @@ fn fit_frame(frame: &Mat, width: i32, height: i32) -> Result<Mat> {
         Size::new(resized_width, resized_height),
         0.0,
         0.0,
-        imgproc::INTER_AREA,
+        imgproc::INTER_LINEAR,
     )?;
 
-    let mut canvas = Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::PANEL)?;
-    let x0 = (width - resized_width) / 2;
-    let y0 = (height - resized_height) / 2;
+    let x0 = ((resized_width - width) / 2).max(0);
+    let y0 = ((resized_height - height) / 2).max(0);
+    let roi = Rect::new(x0, y0, width, height);
+    let cropped = Mat::roi(&resized, roi)?;
+    let mut filled = Mat::default();
+    cropped.copy_to(&mut filled)?;
+    Ok(filled)
+}
 
-    let roi = Rect::new(x0, y0, resized_width, resized_height);
-    let mut dest = Mat::roi_mut(&mut canvas, roi)?;
-    resized.copy_to(&mut dest)?;
+fn render_transition_frame(
+    slot: &SlotState,
+    current_frame: &Mat,
+    width: i32,
+    height: i32,
+    transition: TransitionMode,
+    transition_ms: u64,
+) -> Result<Mat> {
+    let current = fill_frame(current_frame, width, height)?;
 
-    Ok(canvas)
+    if transition != TransitionMode::Fade || transition_ms == 0 {
+        return Ok(current);
+    }
+
+    let Some(previous_frame) = &slot.transition_from else {
+        return Ok(current);
+    };
+    let Some(started_at) = slot.transition_started_at else {
+        return Ok(current);
+    };
+
+    let elapsed = Instant::now().saturating_duration_since(started_at);
+    if elapsed >= Duration::from_millis(transition_ms) {
+        return Ok(current);
+    }
+
+    let previous = fill_frame(previous_frame, width, height)?;
+    let progress = elapsed.as_secs_f64() / Duration::from_millis(transition_ms).as_secs_f64();
+    let alpha = progress.clamp(0.0, 1.0);
+    let beta = 1.0 - alpha;
+    let mut blended = Mat::default();
+    core::add_weighted(&current, alpha, &previous, beta, 0.0, &mut blended, -1)?;
+    Ok(blended)
 }
 
 fn put_text(
