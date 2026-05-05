@@ -1,3 +1,9 @@
+//! QuadPlayer: A 2x2 mosaic video player using OpenCV.
+//!
+//! This application searches for video files in a specified directory
+//! and plays four of them simultaneously in a 2x2 grid. It features smooth transitions,
+//! random shuffling, and interactive playback controls.
+
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use opencv::{
@@ -13,8 +19,19 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
+/// Supported video file extensions.
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "avi", "webm", "mpg", "mpeg"];
 
+mod config;
+mod downloader;
+mod scenes;
+
+use config::Keybindings;
+use downloader::DownloadJob;
+use scenes::{load_scenes, save_scenes, Scene, SceneData};
+
+/// Custom theme constants for BGR colors used in overlays and UI elements,
+/// inspired by the Dracula color palette.
 struct Dracula;
 impl Dracula {
     const BG: Scalar = Scalar::new(24.0, 18.0, 16.0, 0.0); // BGR
@@ -29,11 +46,12 @@ impl Dracula {
     const SHADOW: Scalar = Scalar::new(12.0, 9.0, 8.0, 0.0);
 }
 
+/// Command-line arguments for the QuadPlayer application.
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Play a 2x2 mosaic of local videos", long_about = None)]
 struct Args {
-    #[arg(default_value = ".")]
-    directory: PathBuf,
+    #[arg(num_args = 0.., default_value = ".")]
+    inputs: Vec<String>,
 
     #[arg(long)]
     width: Option<i32>,
@@ -67,14 +85,19 @@ struct Args {
     transition_ms: u64,
 }
 
+/// Represents a single video file discovered in the target directory.
 #[derive(Clone, Debug)]
 struct VideoEntry {
+    /// The absolute or relative path to the video file.
     path: PathBuf,
 }
 
+/// The visual transition style to use when swapping videos.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum TransitionMode {
+    /// Instant cut with no interpolation.
     Cut,
+    /// Smooth crossfade between the old and new frames.
     Fade,
 }
 
@@ -94,6 +117,10 @@ impl TransitionMode {
     }
 }
 
+/// Searches a directory for supported video files.
+///
+/// Filters out partial downloads (e.g., `.part` files) and limits by extension.
+/// If `recursive` is true, subdirectories are also searched.
 fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
     let mut entries = Vec::new();
     let walker = if recursive {
@@ -122,6 +149,8 @@ fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
     entries
 }
 
+/// Manages a collection of discovered videos, handling shuffling and selection
+/// to ensure diverse playback without immediate repetition.
 struct VideoPool {
     entries: Vec<VideoEntry>,
     shuffle: bool,
@@ -172,6 +201,7 @@ impl VideoPool {
     }
 }
 
+/// Maintains the playback state, timing, and current frame for a single mosaic tile.
 struct SlotState {
     slot_index: usize,
     entry: Option<VideoEntry>,
@@ -180,10 +210,14 @@ struct SlotState {
     transition_from: Option<Mat>,
     transition_started_at: Option<Instant>,
     fps: f64,
+    frame_count: i32,
     frame_index: i32,
     clip_start_frame: i32,
     clip_end_frame: Option<i32>,
     next_frame_at: Option<Instant>,
+    paused: bool,
+    download_job: Option<DownloadJob>,
+    scene_start_mark: Option<i32>,
 }
 
 impl SlotState {
@@ -196,14 +230,21 @@ impl SlotState {
             transition_from: None,
             transition_started_at: None,
             fps: 30.0,
+            frame_count: 0,
             frame_index: 0,
             clip_start_frame: 0,
             clip_end_frame: None,
             next_frame_at: None,
+            paused: false,
+            download_job: None,
+            scene_start_mark: None,
         }
     }
 
     fn label(&self) -> String {
+        if self.download_job.is_some() {
+            return "DOWNLOADING...".to_string();
+        }
         self.entry
             .as_ref()
             .map(|e| {
@@ -217,6 +258,8 @@ impl SlotState {
     }
 }
 
+/// The main orchestrator managing the OpenCV window, the four video slots,
+/// and the playback loop.
 struct QuadPlayer {
     args: Args,
     window_name: String,
@@ -229,10 +272,26 @@ struct QuadPlayer {
     show_help: bool,
     fullscreen: bool,
     blank_frame: Mat,
+    config: Keybindings,
+    active_slot: usize,
+    input_state: Option<InputState>,
+    explicit_mode: bool,
+}
+
+enum InputState {
+    UrlInput { text: String },
+    TagInput { text: String },
 }
 
 impl QuadPlayer {
-    fn new(args: Args, entries: Vec<VideoEntry>, width: i32, height: i32) -> Result<Self> {
+    fn new(
+        args: Args,
+        entries: Vec<VideoEntry>,
+        width: i32,
+        height: i32,
+        config: Keybindings,
+        explicit_mode: bool,
+    ) -> Result<Self> {
         let fullscreen = args.fullscreen;
         let pool = VideoPool::new(entries, !args.no_shuffle, args.seed);
         let rng = if let Some(s) = args.seed {
@@ -261,6 +320,10 @@ impl QuadPlayer {
             show_help: true,
             fullscreen,
             blank_frame,
+            config,
+            active_slot: 0,
+            input_state: None,
+            explicit_mode,
         })
     }
 
@@ -274,6 +337,7 @@ impl QuadPlayer {
         }
 
         loop {
+            let start = Instant::now();
             if !self.paused {
                 for i in 0..4 {
                     self.advance_slot(i)?;
@@ -282,6 +346,11 @@ impl QuadPlayer {
 
             let mosaic = self.compose_frame()?;
             highgui::imshow(&self.window_name, &mosaic)?;
+
+            let elapsed = start.elapsed();
+            if elapsed > Duration::from_millis(20) {
+                println!("WARN: Loop tick took {:?}", elapsed);
+            }
 
             let key = highgui::wait_key(20)?;
             if key != -1 {
@@ -305,6 +374,71 @@ impl QuadPlayer {
     }
 
     fn handle_key(&mut self, key: char) -> Result<bool> {
+        if let Some(mut state) = self.input_state.take() {
+            if key == '\r' || key == '\n' {
+                match state {
+                    InputState::UrlInput { text } => {
+                        self.load_url_in_slot(self.active_slot, text)?;
+                    }
+                    InputState::TagInput { text } => {
+                        self.finish_scene(self.active_slot, text)?;
+                    }
+                }
+                return Ok(true);
+            } else if key == '\u{1b}' {
+                return Ok(true);
+            } else if key == '\u{8}' || key == '\x7f' {
+                match &mut state {
+                    InputState::UrlInput { text } => { text.pop(); }
+                    InputState::TagInput { text } => { text.pop(); }
+                }
+                self.input_state = Some(state);
+                return Ok(true);
+            } else if key.is_ascii_graphic() || key == ' ' {
+                match &mut state {
+                    InputState::UrlInput { text } => text.push(key),
+                    InputState::TagInput { text } => text.push(key),
+                }
+                self.input_state = Some(state);
+                return Ok(true);
+            }
+            self.input_state = Some(state);
+            return Ok(true);
+        }
+
+        if key == self.config.select_slot_1 { self.active_slot = 0; return Ok(true); }
+        if key == self.config.select_slot_2 { self.active_slot = 1; return Ok(true); }
+        if key == self.config.select_slot_3 { self.active_slot = 2; return Ok(true); }
+        if key == self.config.select_slot_4 { self.active_slot = 3; return Ok(true); }
+        if key == self.config.pause_active {
+            let slot = &mut self.slots[self.active_slot];
+            slot.paused = !slot.paused;
+            return Ok(true);
+        }
+        if key == self.config.seek_forward_active {
+            self.seek_slot(self.active_slot, 5.0)?;
+            return Ok(true);
+        }
+        if key == self.config.seek_backward_active {
+            self.seek_slot(self.active_slot, -5.0)?;
+            return Ok(true);
+        }
+        if key == self.config.load_video {
+            self.input_state = Some(InputState::UrlInput { text: String::new() });
+            return Ok(true);
+        }
+        if key == self.config.mark_scene_start {
+            let slot = &mut self.slots[self.active_slot];
+            slot.scene_start_mark = Some(slot.frame_index);
+            return Ok(true);
+        }
+        if key == self.config.mark_scene_stop {
+            let slot = &mut self.slots[self.active_slot];
+            slot.paused = true;
+            self.input_state = Some(InputState::TagInput { text: String::new() });
+            return Ok(true);
+        }
+
         match key {
             'q' | '\u{1b}' => return Ok(false),
             ' ' => {
@@ -341,6 +475,57 @@ impl QuadPlayer {
             _ => {}
         }
         Ok(true)
+    }
+
+    fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let job = downloader::start_download(url);
+            self.release_slot(slot_index)?;
+            self.slots[slot_index].download_job = Some(job);
+        } else {
+            // Treat as local file
+            self.release_slot(slot_index)?;
+            self.load_file_into_slot(slot_index, PathBuf::from(url))?;
+        }
+        Ok(())
+    }
+
+    fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
+        let slot = &mut self.slots[slot_index];
+        slot.paused = false;
+        let start_frame = slot.scene_start_mark.unwrap_or(0);
+        let end_frame = slot.frame_index;
+        slot.scene_start_mark = None;
+        
+        if let Some(entry) = &slot.entry {
+            let mut data = load_scenes(&entry.path).unwrap_or_default();
+            let tags: Vec<String> = tags_text.split_whitespace().map(|s| s.to_string()).collect();
+            data.scenes.push(Scene {
+                start_frame,
+                end_frame,
+                tags,
+            });
+            let total_frames = slot.frame_count;
+            if let Err(e) = save_scenes(&entry.path, &data, total_frames) {
+                println!("Error saving scene: {}", e);
+            } else {
+                println!("Scene saved.");
+            }
+        }
+        Ok(())
+    }
+
+    fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
+        let slot = &mut self.slots[slot_index];
+        if let Some(capture) = &mut slot.capture {
+            let fps = slot.fps.max(1.0);
+            let frames = (seconds * fps) as i32;
+            let mut target = slot.frame_index + frames;
+            target = target.clamp(0, slot.frame_count - 1);
+            capture.set(videoio::CAP_PROP_POS_FRAMES, target as f64)?;
+            slot.frame_index = target;
+        }
+        Ok(())
     }
 
     fn apply_window_mode(&self) -> Result<()> {
@@ -482,11 +667,16 @@ impl QuadPlayer {
         }
 
         let mut frame = Mat::default();
+        let start = Instant::now();
         let success = self.slots[slot_index]
             .capture
             .as_mut()
             .unwrap()
             .read(&mut frame)?;
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_millis(10) {
+            println!("WARN: Slot {} capture read took {:?}", slot_index, elapsed);
+        }
 
         if success {
             let slot = &mut self.slots[slot_index];
@@ -510,6 +700,7 @@ impl QuadPlayer {
     }
 
     fn compose_frame(&self) -> Result<Mat> {
+        let start = Instant::now();
         let tile_width = self.width / 2;
         let tile_height = self.height / 2;
         let mut canvas = self.blank_frame.clone();
@@ -553,10 +744,19 @@ impl QuadPlayer {
             0,
         )?;
 
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_millis(16) {
+            println!("WARN: compose_frame took {:?}", elapsed);
+        }
+
         Ok(canvas)
     }
 }
 
+/// Renders the UI overlay and final frame for a single mosaic slot.
+///
+/// This includes the video frame itself (with potential transition effects),
+/// bounding boxes, and informational text elements (labels, status, paused state).
 fn render_slot(
     slot: &SlotState,
     width: i32,
@@ -701,6 +901,7 @@ fn render_slot(
     Ok(canvas)
 }
 
+/// Truncates a string by replacing its middle section with `...` if it exceeds `max_chars`.
 fn ellipsize_middle(text: &str, max_chars: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {
@@ -718,7 +919,10 @@ fn ellipsize_middle(text: &str, max_chars: usize) -> String {
     format!("{}...{}", start, end)
 }
 
+/// Resizes and crops a frame to perfectly fill the specified dimensions
+/// while maintaining the original aspect ratio.
 fn fill_frame(frame: &Mat, width: i32, height: i32) -> Result<Mat> {
+    let start = Instant::now();
     let size = frame.size()?;
     if size.width == 0 || size.height == 0 {
         return Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::PANEL)
@@ -745,9 +949,18 @@ fn fill_frame(frame: &Mat, width: i32, height: i32) -> Result<Mat> {
     let cropped = Mat::roi(&resized, roi)?;
     let mut filled = Mat::default();
     cropped.copy_to(&mut filled)?;
+
+    let elapsed = start.elapsed();
+    if elapsed > Duration::from_millis(10) {
+        println!("WARN: fill_frame (resize) took {:?}", elapsed);
+    }
+
     Ok(filled)
 }
 
+/// Blends the previous frame and current frame based on elapsed transition time.
+///
+/// Returns the pure current frame if no transition is active or the transition has completed.
 fn render_transition_frame(
     slot: &SlotState,
     current_frame: &Mat,
@@ -783,6 +996,7 @@ fn render_transition_frame(
     Ok(blended)
 }
 
+/// Draws text on a `Mat` with a drop shadow effect for better readability.
 fn put_text(
     image: &mut Mat,
     text: &str,
@@ -829,17 +1043,39 @@ fn put_text(
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let entries = discover_videos(&args.directory, args.recursive);
-    if entries.is_empty() {
-        anyhow::bail!("No video files found in {:?}", args.directory);
+    let config = config::load_keybindings().unwrap_or_default();
+
+    let mut explicit_mode = false;
+    let entries = if args.inputs.is_empty()
+        || (args.inputs.len() == 1 && Path::new(&args.inputs[0]).is_dir())
+    {
+        let dir = if args.inputs.is_empty() {
+            Path::new(".")
+        } else {
+            Path::new(&args.inputs[0])
+        };
+        discover_videos(dir, args.recursive)
+    } else {
+        explicit_mode = true;
+        args.inputs
+            .iter()
+            .map(|s| VideoEntry {
+                path: PathBuf::from(s),
+            })
+            .collect()
+    };
+
+    if entries.is_empty() && !explicit_mode {
+        anyhow::bail!("No video files found");
     }
 
     let (width, height) = resolve_dimensions(&args)?;
-    let mut player = QuadPlayer::new(args, entries, width, height)?;
+    let mut player = QuadPlayer::new(args, entries, width, height, config, explicit_mode)?;
     player.run()?;
     Ok(())
 }
 
+/// Determines the target window dimensions based on CLI arguments and display detection.
 fn resolve_dimensions(args: &Args) -> Result<(i32, i32)> {
     let default_width = 1280;
     let default_height = 720;
@@ -857,6 +1093,7 @@ fn resolve_dimensions(args: &Args) -> Result<(i32, i32)> {
     ))
 }
 
+/// Queries the X11 server via `xdpyinfo` to detect the current display resolution.
 fn detect_display_dimensions() -> Result<(i32, i32)> {
     let output = Command::new("xdpyinfo")
         .output()
