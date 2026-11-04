@@ -2,7 +2,7 @@ use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::downloader::{self, DownloadJob};
 use crate::scenes::{Scene, load_scenes, save_scenes};
-use crate::ui::{Dracula, SlotRenderInfo, render_slot};
+use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, render_slot};
 use crate::video::{VideoEntry, VideoPool};
 use anyhow::Result;
 use opencv::{
@@ -592,10 +592,10 @@ impl QuadPlayer {
             let interval = Duration::from_secs_f64(1.0 / slot.fps.max(1.0));
             slot.next_frame_at = Some(slot.next_frame_at.unwrap_or(now).max(now) + interval);
 
-            if let Some(end) = slot.clip_end_frame {
-                if slot.frame_index >= end {
-                    return self.fill_slot(slot_index);
-                }
+            if let Some(end) = slot.clip_end_frame
+                && slot.frame_index >= end
+            {
+                return self.fill_slot(slot_index);
             }
             return Ok(());
         }
@@ -622,11 +622,13 @@ impl QuadPlayer {
                 &render_info,
                 tile_width,
                 tile_height,
-                self.show_help,
-                self.paused,
-                self.fullscreen,
-                self.args.transition,
-                self.args.transition_ms,
+                RenderOptions {
+                    show_help: self.show_help,
+                    paused: self.paused,
+                    fullscreen: self.fullscreen,
+                    transition: self.args.transition,
+                    transition_ms: self.args.transition_ms,
+                },
             )?;
 
             let roi = Rect::new(x0, y0, tile_width, tile_height);

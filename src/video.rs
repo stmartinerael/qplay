@@ -43,16 +43,15 @@ pub fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
     for entry in walker.into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                if VIDEO_EXTENSIONS.contains(&ext.to_lowercase().as_str())
-                    && !path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .ends_with(".part")
-                {
-                    entries.push(VideoEntry::new(path));
-                }
+            if let Some(ext) = path.extension().and_then(|s| s.to_str())
+                && VIDEO_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+                && !path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .ends_with(".part")
+            {
+                entries.push(VideoEntry::new(path));
             }
         }
     }

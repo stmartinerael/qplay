@@ -34,17 +34,31 @@ pub struct SlotRenderInfo<'a> {
     pub transition_started_at: Option<Instant>,
 }
 
+/// UI/state options controlling how a single slot is rendered.
+#[derive(Clone, Copy)]
+pub struct RenderOptions {
+    pub show_help: bool,
+    pub paused: bool,
+    pub fullscreen: bool,
+    pub transition: TransitionMode,
+    pub transition_ms: u64,
+}
+
 /// Renders the UI overlay and final frame for a single mosaic slot.
 pub fn render_slot(
     info: &SlotRenderInfo,
     width: i32,
     height: i32,
-    show_help: bool,
-    paused: bool,
-    fullscreen: bool,
-    transition: TransitionMode,
-    transition_ms: u64,
+    opts: RenderOptions,
 ) -> Result<Mat> {
+    let RenderOptions {
+        show_help,
+        paused,
+        fullscreen,
+        transition,
+        transition_ms,
+    } = opts;
+
     let mut canvas = Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::PANEL)?;
 
     if let Some(frame) = info.frame {
