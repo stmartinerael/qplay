@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Keybindings {
     pub select_slot_1: char,
     pub select_slot_2: char,
@@ -52,5 +52,29 @@ pub fn load_keybindings() -> Result<Keybindings> {
         let json = serde_json::to_string_pretty(&bindings)?;
         fs::write(&config_path, json)?;
         Ok(bindings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keybindings_default_roundtrip() -> Result<()> {
+        let default_bindings = Keybindings::default();
+        let json = serde_json::to_string_pretty(&default_bindings)?;
+        let deserialized: Keybindings = serde_json::from_str(&json)?;
+        assert_eq!(default_bindings, deserialized);
+        Ok(())
+    }
+
+    #[test]
+    fn test_keybindings_defaults_values() {
+        let bindings = Keybindings::default();
+        assert_eq!(bindings.select_slot_1, '!');
+        assert_eq!(bindings.pause_active, 'k');
+        assert_eq!(bindings.load_video, 'l');
+        assert_eq!(bindings.mark_scene_start, '[');
+        assert_eq!(bindings.mark_scene_stop, ']');
     }
 }

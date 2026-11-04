@@ -27,7 +27,7 @@ fn download_sync(url: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&temp_dir)?;
 
     let mut rng = rand::thread_rng();
-    let id: u64 = rng.gen();
+    let id: u64 = rng.r#gen();
     let file_path = temp_dir.join(format!("{}.mp4", id));
 
     let status = Command::new("yt-dlp")
@@ -48,4 +48,15 @@ fn download_sync(url: &str) -> Result<PathBuf> {
     }
 
     Ok(file_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_download_job_creation() {
+        let job = start_download("https://example.com/test.mp4".to_string());
+        assert_eq!(job.url, "https://example.com/test.mp4");
+    }
 }
