@@ -4,7 +4,7 @@ use crate::config::Keybindings;
 use crate::controls::{self, Action};
 #[cfg(feature = "downloading")]
 use crate::downloader::{self, DownloadJob, DownloadedFile};
-use crate::playback::{Command, PlaybackCore};
+use crate::playback::{Command, FrameAction, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, put_text, render_slot};
@@ -27,12 +27,6 @@ pub struct SlotState {
     pub frame: Option<Mat>,
     pub transition_from: Option<Mat>,
     pub transition_started_at: Option<Instant>,
-    pub fps: f64,
-    pub frame_count: i32,
-    pub frame_index: i32,
-    pub clip_start_frame: i32,
-    pub clip_end_frame: Option<i32>,
-    pub next_frame_at: Option<Instant>,
     #[cfg(feature = "downloading")]
     pub download_job: Option<DownloadJob>,
     #[cfg(feature = "downloading")]
@@ -50,12 +44,6 @@ impl SlotState {
             frame: None,
             transition_from: None,
             transition_started_at: None,
-            fps: 30.0,
-            frame_count: 0,
-            frame_index: 0,
-            clip_start_frame: 0,
-            clip_end_frame: None,
-            next_frame_at: None,
             #[cfg(feature = "downloading")]
             download_job: None,
             #[cfg(feature = "downloading")]
@@ -87,7 +75,7 @@ impl SlotState {
             .unwrap_or_else(|| "[empty]".to_string())
     }
 
-    pub fn to_render_info<'a>(&'a self) -> SlotRenderInfo<'a> {
+    pub fn to_render_info<'a>(&'a self, frame_index: i32) -> SlotRenderInfo<'a> {
         SlotRenderInfo {
             slot_index: self.slot_index,
             label: if let Some(error) = &self.error {
@@ -102,7 +90,7 @@ impl SlotState {
             } else {
                 "[empty]"
             },
-            frame_index: self.frame_index,
+            frame_index,
             frame: self.frame.as_ref(),
             transition_from: self.transition_from.as_ref(),
             transition_started_at: self.transition_started_at,
@@ -292,8 +280,9 @@ impl QuadPlayer {
                 })
             }
             Some(Action::SceneStart) => {
-                let slot = &mut self.slots[self.core.selected()];
-                slot.scene_start_mark = Some(slot.frame_index);
+                let index = self.core.selected();
+                self.slots[index].scene_start_mark =
+                    self.core.slot(index).map(|slot| slot.position);
             }
             Some(Action::SceneStop) => {
                 let was_paused = self
@@ -315,9 +304,7 @@ impl QuadPlayer {
                     .expect("valid command");
                 if !self.core.paused() {
                     let now = Instant::now();
-                    for slot in &mut self.slots {
-                        slot.next_frame_at = Some(now);
-                    }
+                    self.core.resume_at(now);
                 }
             }
             Some(Action::Replace(index)) => self.fill_slot(index)?,
@@ -373,7 +360,10 @@ impl QuadPlayer {
     pub fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
         let slot = &mut self.slots[slot_index];
         let start_frame = slot.scene_start_mark.unwrap_or(0);
-        let end_frame = slot.frame_index;
+        let Some(timeline) = self.core.slot(slot_index) else {
+            return Ok(());
+        };
+        let end_frame = timeline.position;
 
         if let Some(entry) = &slot.entry {
             let mut data = load_scenes(&entry.path)?;
@@ -386,7 +376,7 @@ impl QuadPlayer {
                 end_frame,
                 tags,
             });
-            let total_frames = slot.frame_count;
+            let total_frames = timeline.frame_count;
             save_scenes(&entry.path, &data, total_frames)?;
             slot.scene_start_mark = None;
             println!("Scene saved.");
@@ -400,17 +390,32 @@ impl QuadPlayer {
     }
 
     pub fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
+        let Some(target) = self.core.seek_target(slot_index, seconds) else {
+            return Ok(());
+        };
         let slot = &mut self.slots[slot_index];
         if let Some(capture) = &mut slot.capture {
-            let target =
-                crate::playback::seek_target(slot.frame_index, seconds, slot.fps, slot.frame_count);
-            capture.seek(target)?;
-            let frame = capture
-                .read()?
-                .ok_or_else(|| anyhow::anyhow!("Could not read frame after seek"))?;
-            slot.frame = Some(frame);
-            slot.frame_index = target;
-            slot.next_frame_at = Some(Instant::now());
+            let old_position = self.core.slot(slot_index).unwrap().position;
+            let result = capture
+                .seek(target)
+                .and_then(|()| capture.read())
+                .and_then(|frame| {
+                    frame.ok_or_else(|| anyhow::anyhow!("Could not read frame after seek"))
+                });
+            match result {
+                Ok(frame) => {
+                    slot.frame = Some(frame);
+                    self.core.seeked(slot_index, target, Instant::now());
+                }
+                Err(error) => {
+                    if let Err(restore) = capture.seek(old_position.saturating_add(1)) {
+                        eprintln!(
+                            "Could not restore capture position after failed seek: {restore:#}"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -471,6 +476,17 @@ impl QuadPlayer {
             return Ok(false);
         };
 
+        self.core
+            .opened(
+                slot_index,
+                fps,
+                frame_count,
+                clip_start_frame,
+                clip_end_frame,
+                Instant::now(),
+            )
+            .map_err(anyhow::Error::msg)?;
+
         let slot = &mut self.slots[slot_index];
         slot.entry = Some(entry);
         slot.capture = Some(capture);
@@ -480,15 +496,9 @@ impl QuadPlayer {
             slot.downloaded_file = None;
         }
         slot.error = None;
-        slot.fps = fps;
-        slot.frame_count = frame_count;
-        slot.frame_index = clip_start_frame;
-        slot.clip_start_frame = clip_start_frame;
-        slot.clip_end_frame = clip_end_frame;
         slot.frame = Some(first_frame);
         slot.transition_from = None;
         slot.transition_started_at = None;
-        slot.next_frame_at = Some(Instant::now());
 
         if self.slots[slot_index].frame.is_some() {
             if self.args.transition == TransitionMode::Fade
@@ -533,10 +543,7 @@ impl QuadPlayer {
         slot.frame = None;
         slot.transition_from = None;
         slot.transition_started_at = None;
-        slot.frame_index = 0;
-        slot.clip_start_frame = 0;
-        slot.clip_end_frame = None;
-        slot.next_frame_at = None;
+        self.core.clear(slot_index);
         #[cfg(feature = "downloading")]
         {
             slot.download_job = None;
@@ -580,36 +587,19 @@ impl QuadPlayer {
     pub fn read_next_frame(&mut self, slot_index: usize, allow_refill: bool) -> Result<()> {
         let now = Instant::now();
 
-        let needs_read = {
-            let slot = &self.slots[slot_index];
-            if slot.capture.is_none() {
-                if allow_refill {
-                    return self.fill_slot(slot_index);
-                }
-                return Ok(());
-            }
-
-            if allow_refill {
-                if let Some(next_at) = slot.next_frame_at {
-                    now >= next_at
-                } else {
-                    true
-                }
+        if self.slots[slot_index].capture.is_none() {
+            return if allow_refill {
+                self.fill_slot(slot_index)
             } else {
-                true
-            }
-        };
-
-        if !needs_read {
-            return Ok(());
+                Ok(())
+            };
         }
-
-        if allow_refill
-            && self.slots[slot_index]
-                .clip_end_frame
-                .is_some_and(|end| self.slots[slot_index].frame_index.saturating_add(1) >= end)
-        {
-            return self.fill_slot(slot_index);
+        if allow_refill {
+            match self.core.frame_action(slot_index, now) {
+                FrameAction::Wait => return Ok(()),
+                FrameAction::Replace => return self.fill_slot(slot_index),
+                FrameAction::Read => {}
+            }
         }
 
         let start = Instant::now();
@@ -622,12 +612,7 @@ impl QuadPlayer {
         if let Some(frame) = frame {
             let slot = &mut self.slots[slot_index];
             slot.frame = Some(frame);
-            slot.frame_index = slot.frame_index.saturating_add(1);
-            slot.next_frame_at = Some(crate::playback::next_frame_time(
-                now,
-                slot.next_frame_at,
-                slot.fps,
-            ));
+            self.core.frame_read(slot_index, now);
 
             return Ok(());
         }
@@ -649,7 +634,8 @@ impl QuadPlayer {
             let y0 = if i < 2 { 0 } else { tile_height };
             let x0 = if i % 2 == 0 { 0 } else { tile_width };
 
-            let render_info = self.slots[i].to_render_info();
+            let render_info =
+                self.slots[i].to_render_info(self.core.slot(i).map_or(0, |slot| slot.position));
             let tile = render_slot(
                 &render_info,
                 tile_width,

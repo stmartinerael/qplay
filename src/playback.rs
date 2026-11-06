@@ -16,6 +16,26 @@ pub struct PlaybackCore {
     selected: usize,
     paused: bool,
     slots_paused: [bool; 4],
+    slots: [Option<SlotSnapshot>; 4],
+}
+
+/// Read-only metadata for the frame currently displayed by a slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlotSnapshot {
+    pub fps: f64,
+    pub frame_count: i32,
+    pub position: i32,
+    pub clip_start: i32,
+    /// Exclusive clip end.
+    pub clip_end: Option<i32>,
+    pub next_frame_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAction {
+    Wait,
+    Read,
+    Replace,
 }
 
 impl PlaybackCore {
@@ -30,6 +50,83 @@ impl PlaybackCore {
             Command::SetSelectedPause(paused) => self.slots_paused[self.selected] = paused,
         }
         Ok(())
+    }
+    pub fn slot(&self, index: usize) -> Option<SlotSnapshot> {
+        self.slots.get(index).copied().flatten()
+    }
+
+    /// Commit metadata only after a backend has opened and decoded the first frame.
+    pub fn opened(
+        &mut self,
+        index: usize,
+        fps: f64,
+        frame_count: i32,
+        start: i32,
+        end: Option<i32>,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        if index >= self.slots.len()
+            || !fps.is_finite()
+            || fps <= 0.0
+            || frame_count < 0
+            || start < 0
+            || (frame_count > 0 && start >= frame_count)
+            || end.is_some_and(|end| end <= start)
+        {
+            return Err("invalid slot metadata");
+        }
+        self.slots[index] = Some(SlotSnapshot {
+            fps,
+            frame_count,
+            position: start,
+            clip_start: start,
+            clip_end: end,
+            next_frame_at: now,
+        });
+        Ok(())
+    }
+    pub fn clear(&mut self, index: usize) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            *slot = None;
+        }
+    }
+    pub fn resume_at(&mut self, now: Instant) {
+        for slot in self.slots.iter_mut().flatten() {
+            slot.next_frame_at = now;
+        }
+    }
+    pub fn seek_target(&self, index: usize, seconds: f64) -> Option<i32> {
+        self.slot(index)
+            .map(|slot| seek_target(slot.position, seconds, slot.fps, slot.frame_count))
+    }
+    /// Commit a seek only after the backend successfully decodes the target.
+    pub fn seeked(&mut self, index: usize, target: i32, now: Instant) {
+        if let Some(Some(slot)) = self.slots.get_mut(index) {
+            slot.position = target;
+            slot.next_frame_at = now;
+        }
+    }
+    pub fn frame_action(&self, index: usize, now: Instant) -> FrameAction {
+        let Some(slot) = self.slot(index) else {
+            return FrameAction::Replace;
+        };
+        if self.slot_paused(index).unwrap_or(true) || now < slot.next_frame_at {
+            return FrameAction::Wait;
+        }
+        if slot
+            .clip_end
+            .is_some_and(|end| slot.position.saturating_add(1) >= end)
+        {
+            FrameAction::Replace
+        } else {
+            FrameAction::Read
+        }
+    }
+    pub fn frame_read(&mut self, index: usize, now: Instant) {
+        if let Some(Some(slot)) = self.slots.get_mut(index) {
+            slot.position = slot.position.saturating_add(1);
+            slot.next_frame_at = next_frame_time(now, Some(slot.next_frame_at), slot.fps);
+        }
     }
     pub fn selected(&self) -> usize {
         self.selected
@@ -91,6 +188,36 @@ mod tests {
         assert_eq!(seek_target(10, -5.0, 30.0, 100), 0);
         assert_eq!(seek_target(10, 5.0, 30.0, 100), 99);
         assert_eq!(seek_target(10, 5.0, 30.0, 0), 160);
+    }
+
+    #[test]
+    fn timeline_commits_only_successful_operations_and_honors_boundaries() {
+        let now = Instant::now();
+        let mut core = PlaybackCore::default();
+        assert_eq!(core.frame_action(0, now), FrameAction::Replace);
+        core.opened(0, 10.0, 20, 4, Some(6), now).unwrap();
+        assert_eq!(core.slot(0).unwrap().position, 4);
+        let original = core.slot(0);
+        assert!(core.opened(0, f64::NAN, 20, 0, None, now).is_err());
+        assert_eq!(core.slot(0), original);
+        assert_eq!(core.frame_action(0, now), FrameAction::Read);
+        core.frame_read(0, now);
+        assert_eq!(core.slot(0).unwrap().position, 5);
+        assert_eq!(core.frame_action(0, now), FrameAction::Wait);
+        assert_eq!(
+            core.frame_action(0, now + Duration::from_millis(100)),
+            FrameAction::Replace
+        );
+        core.apply(Command::TogglePause).unwrap();
+        assert_eq!(
+            core.frame_action(0, now + Duration::from_secs(1)),
+            FrameAction::Wait
+        );
+        let target = core.seek_target(0, -1.0).unwrap();
+        assert_eq!(target, 0);
+        assert_eq!(core.slot(0).unwrap().position, 5); // a failed seek never commits
+        core.seeked(0, target, now);
+        assert_eq!(core.slot(0).unwrap().position, 0);
     }
 
     #[test]
