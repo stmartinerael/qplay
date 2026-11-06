@@ -20,7 +20,7 @@ pub fn save_scenes(video_path: &Path, data: &SceneData, total_frames: i32) -> Re
     for scene in &data.scenes {
         if scene.start_frame < 0
             || scene.start_frame > scene.end_frame
-            || scene.end_frame > total_frames
+            || (total_frames > 0 && scene.end_frame > total_frames)
         {
             anyhow::bail!(
                 "Scene invariant violated: 0 <= {} <= {} <= {}",
@@ -111,6 +111,33 @@ mod tests {
             tags: vec![],
         });
         assert!(save_scenes(path, &data, 100).is_err());
+    }
+
+    #[test]
+    fn unknown_frame_count_allows_valid_scenes() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("video.mp4");
+        let data = SceneData {
+            scenes: vec![Scene {
+                start_frame: 2,
+                end_frame: 10,
+                tags: vec![],
+            }],
+        };
+        save_scenes(&path, &data, 0)?;
+        assert_eq!(load_scenes(&path)?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_sidecar_is_not_silently_loaded() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("video.mp4");
+        let sidecar = get_sidecar_path(&path);
+        std::fs::write(&sidecar, "broken")?;
+        assert!(load_scenes(&path).is_err());
+        assert_eq!(std::fs::read_to_string(sidecar)?, "broken");
+        Ok(())
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 pub mod cli;
 pub mod config;
 pub mod downloader;
+pub mod playback;
 pub mod player;
 pub mod scenes;
 pub mod ui;

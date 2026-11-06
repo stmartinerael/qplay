@@ -379,13 +379,8 @@ impl QuadPlayer {
     pub fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
         let slot = &mut self.slots[slot_index];
         if let Some(capture) = &mut slot.capture {
-            let fps = slot.fps.max(1.0);
-            let frames = (seconds * fps) as i32;
-            let mut target = slot.frame_index + frames;
-            target = target.max(0);
-            if slot.frame_count > 0 {
-                target = target.min(slot.frame_count - 1);
-            }
+            let target =
+                crate::playback::seek_target(slot.frame_index, seconds, slot.fps, slot.frame_count);
             capture.set(videoio::CAP_PROP_POS_FRAMES, target as f64)?;
             slot.frame_index = target;
         }
@@ -458,20 +453,25 @@ impl QuadPlayer {
             capture.set(videoio::CAP_PROP_POS_FRAMES, clip_start_frame as f64)?;
         }
 
+        // Validate the first frame before replacing a working slot.
+        let mut first_frame = Mat::default();
+        if !capture.read(&mut first_frame)? || first_frame.empty() {
+            return Ok(false);
+        }
+
         let slot = &mut self.slots[slot_index];
         slot.entry = Some(entry);
         slot.capture = Some(capture);
         slot.fps = fps;
         slot.frame_count = frame_count;
-        slot.frame_index = clip_start_frame;
+        slot.frame_index = clip_start_frame.saturating_add(1);
         slot.clip_start_frame = clip_start_frame;
         slot.clip_end_frame = clip_end_frame;
-        slot.frame = None;
+        slot.frame = Some(first_frame);
         slot.transition_from = None;
         slot.transition_started_at = None;
         slot.next_frame_at = Some(Instant::now());
 
-        self.read_next_frame(slot_index, false)?;
         if self.slots[slot_index].frame.is_some() {
             if self.args.transition == TransitionMode::Fade
                 && self.args.transition_ms > 0
@@ -595,8 +595,11 @@ impl QuadPlayer {
             let slot = &mut self.slots[slot_index];
             slot.frame = Some(frame);
             slot.frame_index += 1;
-            let interval = Duration::from_secs_f64(1.0 / slot.fps.max(1.0));
-            slot.next_frame_at = Some(slot.next_frame_at.unwrap_or(now).max(now) + interval);
+            slot.next_frame_at = Some(crate::playback::next_frame_time(
+                now,
+                slot.next_frame_at,
+                slot.fps,
+            ));
 
             if let Some(end) = slot.clip_end_frame
                 && slot.frame_index >= end
