@@ -1,6 +1,6 @@
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
-use crate::downloader::{self, DownloadJob};
+use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, PlaybackCore};
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, render_slot};
@@ -14,7 +14,6 @@ use opencv::{
 };
 use rand::Rng;
 use std::path::PathBuf;
-use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
@@ -32,6 +31,8 @@ pub struct SlotState {
     pub clip_end_frame: Option<i32>,
     pub next_frame_at: Option<Instant>,
     pub download_job: Option<DownloadJob>,
+    downloaded_file: Option<DownloadedFile>,
+    error: Option<String>,
     pub scene_start_mark: Option<i32>,
 }
 
@@ -51,6 +52,8 @@ impl SlotState {
             clip_end_frame: None,
             next_frame_at: None,
             download_job: None,
+            downloaded_file: None,
+            error: None,
             scene_start_mark: None,
         }
     }
@@ -68,7 +71,9 @@ impl SlotState {
     pub fn to_render_info<'a>(&'a self) -> SlotRenderInfo<'a> {
         SlotRenderInfo {
             slot_index: self.slot_index,
-            label: if self.download_job.is_some() {
+            label: if let Some(error) = &self.error {
+                error
+            } else if self.download_job.is_some() {
                 "DOWNLOADING..."
             } else if let Some(e) = &self.entry {
                 e.path
@@ -162,9 +167,10 @@ impl QuadPlayer {
 
         loop {
             let start = Instant::now();
-            if !self.core.paused() {
-                for i in 0..4 {
-                    self.advance_slot(i)?;
+            for i in 0..4 {
+                if let Err(error) = self.advance_slot(i) {
+                    eprintln!("Slot {}: {error:#}", i + 1);
+                    self.slots[i].error = Some(format!("ERROR: {error}"));
                 }
             }
 
@@ -333,8 +339,8 @@ impl QuadPlayer {
     pub fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
         if url.starts_with("http://") || url.starts_with("https://") {
             let job = downloader::start_download(url);
-            self.release_slot(slot_index)?;
             self.slots[slot_index].download_job = Some(job);
+            self.slots[slot_index].error = None;
         } else {
             // Treat as local file
             self.load_file_into_slot(slot_index, PathBuf::from(url))?;
@@ -465,6 +471,9 @@ impl QuadPlayer {
         let slot = &mut self.slots[slot_index];
         slot.entry = Some(entry);
         slot.capture = Some(capture);
+        slot.download_job = None;
+        slot.downloaded_file = None;
+        slot.error = None;
         slot.fps = fps;
         slot.frame_count = frame_count;
         slot.frame_index = clip_start_frame.saturating_add(1);
@@ -492,7 +501,7 @@ impl QuadPlayer {
 
     pub fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
         let previous_frame = self.slots[slot_index].frame.clone();
-        self.release_slot(slot_index)?;
+        self.slots[slot_index].download_job = None;
         let attempts = self.pool.total_entries().max(1);
         let exclude = self.current_paths(Some(slot_index));
 
@@ -503,7 +512,6 @@ impl QuadPlayer {
             if self.open_entry_in_slot(slot_index, entry, previous_frame.clone())? {
                 return Ok(());
             }
-            self.release_slot(slot_index)?;
         }
 
         anyhow::bail!("Could not open any readable video files.")
@@ -521,30 +529,25 @@ impl QuadPlayer {
         slot.clip_end_frame = None;
         slot.next_frame_at = None;
         slot.download_job = None;
+        slot.downloaded_file = None;
+        slot.error = None;
         slot.scene_start_mark = None;
         Ok(())
     }
 
     pub fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
-        // Check for download completion if downloading
         if let Some(job) = &self.slots[slot_index].download_job {
-            match job.rx.try_recv() {
-                Ok(Ok(path)) => {
+            match job.poll() {
+                Ok(Some(file)) => {
                     self.slots[slot_index].download_job = None;
-                    return self.load_file_into_slot(slot_index, path);
+                    let path = file.path().to_owned();
+                    self.load_file_into_slot(slot_index, path)?;
+                    self.slots[slot_index].downloaded_file = Some(file);
                 }
-                Ok(Err(e)) => {
-                    eprintln!("Download error for slot {}: {}", slot_index, e);
+                Ok(None) => {}
+                Err(error) => {
                     self.slots[slot_index].download_job = None;
-                    return self.fill_slot(slot_index);
-                }
-                Err(TryRecvError::Empty) => {
-                    return Ok(());
-                }
-                Err(TryRecvError::Disconnected) => {
-                    eprintln!("Download thread disconnected for slot {}", slot_index);
-                    self.slots[slot_index].download_job = None;
-                    return self.fill_slot(slot_index);
+                    return Err(error);
                 }
             }
         }
