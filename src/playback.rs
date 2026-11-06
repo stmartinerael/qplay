@@ -1,6 +1,49 @@
 //! Playback calculations independent of input, windowing, and media backends.
 use std::time::{Duration, Instant};
 
+/// Commands handled entirely by playback policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Select(usize),
+    TogglePause,
+    ToggleSelectedPause,
+    SetSelectedPause(bool),
+}
+
+/// Playback decisions, independent of video decoding and windowing.
+#[derive(Debug, Default)]
+pub struct PlaybackCore {
+    selected: usize,
+    paused: bool,
+    slots_paused: [bool; 4],
+}
+
+impl PlaybackCore {
+    pub fn apply(&mut self, command: Command) -> Result<(), &'static str> {
+        match command {
+            Command::Select(index) if index < self.slots_paused.len() => self.selected = index,
+            Command::Select(_) => return Err("invalid slot index"),
+            Command::TogglePause => self.paused = !self.paused,
+            Command::ToggleSelectedPause => {
+                self.slots_paused[self.selected] = !self.slots_paused[self.selected]
+            }
+            Command::SetSelectedPause(paused) => self.slots_paused[self.selected] = paused,
+        }
+        Ok(())
+    }
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+    pub fn slot_paused(&self, index: usize) -> Option<bool> {
+        self.slots_paused
+            .get(index)
+            .map(|paused| self.paused || *paused)
+    }
+}
+
 /// Seek to a nonnegative frame, bounded by the last frame when the count is known.
 pub fn seek_target(position: i32, seconds: f64, fps: f64, frame_count: i32) -> i32 {
     let offset = (seconds * fps.max(1.0)) as i32;
@@ -25,6 +68,20 @@ pub fn next_frame_time(now: Instant, previous: Option<Instant>, fps: f64) -> Ins
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_preserve_slot_pause_across_global_pause() {
+        let mut core = PlaybackCore::default();
+        core.apply(Command::Select(2)).unwrap();
+        core.apply(Command::ToggleSelectedPause).unwrap();
+        core.apply(Command::TogglePause).unwrap();
+        assert_eq!(core.slot_paused(0), Some(true));
+        core.apply(Command::TogglePause).unwrap();
+        assert_eq!(core.slot_paused(0), Some(false));
+        assert_eq!(core.slot_paused(2), Some(true));
+        assert!(core.apply(Command::Select(4)).is_err());
+        assert_eq!(core.selected(), 2);
+    }
 
     #[test]
     fn seek_respects_known_and_unknown_bounds() {

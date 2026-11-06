@@ -1,6 +1,7 @@
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::downloader::{self, DownloadJob};
+use crate::playback::{Command, PlaybackCore};
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, render_slot};
 use crate::video::{VideoEntry, VideoPool};
@@ -30,7 +31,6 @@ pub struct SlotState {
     pub clip_start_frame: i32,
     pub clip_end_frame: Option<i32>,
     pub next_frame_at: Option<Instant>,
-    pub paused: bool,
     pub download_job: Option<DownloadJob>,
     pub scene_start_mark: Option<i32>,
 }
@@ -50,7 +50,6 @@ impl SlotState {
             clip_start_frame: 0,
             clip_end_frame: None,
             next_frame_at: None,
-            paused: false,
             download_job: None,
             scene_start_mark: None,
         }
@@ -102,11 +101,10 @@ pub struct QuadPlayer {
     pub width: i32,
     pub height: i32,
     pub slots: Vec<SlotState>,
-    pub paused: bool,
+    core: PlaybackCore,
     pub show_help: bool,
     pub fullscreen: bool,
     pub config: Keybindings,
-    pub active_slot: usize,
     pub input_state: Option<InputState>,
     pub explicit_mode: bool,
     window_opened: bool,
@@ -142,11 +140,10 @@ impl QuadPlayer {
             width,
             height,
             slots,
-            paused: false,
+            core: PlaybackCore::default(),
             show_help: true,
             fullscreen,
             config,
-            active_slot: 0,
             input_state: None,
             explicit_mode,
             window_opened: false,
@@ -165,7 +162,7 @@ impl QuadPlayer {
 
         loop {
             let start = Instant::now();
-            if !self.paused {
+            if !self.core.paused() {
                 for i in 0..4 {
                     self.advance_slot(i)?;
                 }
@@ -210,10 +207,10 @@ impl QuadPlayer {
             if key == '\r' || key == '\n' {
                 match state {
                     InputState::UrlInput { text } => {
-                        self.load_url_in_slot(self.active_slot, text)?;
+                        self.load_url_in_slot(self.core.selected(), text)?;
                     }
                     InputState::TagInput { text } => {
-                        self.finish_scene(self.active_slot, text)?;
+                        self.finish_scene(self.core.selected(), text)?;
                     }
                 }
                 return Ok(true);
@@ -243,32 +240,33 @@ impl QuadPlayer {
         }
 
         if key == self.config.select_slot_1 {
-            self.active_slot = 0;
+            self.core.apply(Command::Select(0)).expect("valid slot");
             return Ok(true);
         }
         if key == self.config.select_slot_2 {
-            self.active_slot = 1;
+            self.core.apply(Command::Select(1)).expect("valid slot");
             return Ok(true);
         }
         if key == self.config.select_slot_3 {
-            self.active_slot = 2;
+            self.core.apply(Command::Select(2)).expect("valid slot");
             return Ok(true);
         }
         if key == self.config.select_slot_4 {
-            self.active_slot = 3;
+            self.core.apply(Command::Select(3)).expect("valid slot");
             return Ok(true);
         }
         if key == self.config.pause_active {
-            let slot = &mut self.slots[self.active_slot];
-            slot.paused = !slot.paused;
+            self.core
+                .apply(Command::ToggleSelectedPause)
+                .expect("valid command");
             return Ok(true);
         }
         if key == self.config.seek_forward_active {
-            self.seek_slot(self.active_slot, 5.0)?;
+            self.seek_slot(self.core.selected(), 5.0)?;
             return Ok(true);
         }
         if key == self.config.seek_backward_active {
-            self.seek_slot(self.active_slot, -5.0)?;
+            self.seek_slot(self.core.selected(), -5.0)?;
             return Ok(true);
         }
         if key == self.config.load_video {
@@ -278,13 +276,14 @@ impl QuadPlayer {
             return Ok(true);
         }
         if key == self.config.mark_scene_start {
-            let slot = &mut self.slots[self.active_slot];
+            let slot = &mut self.slots[self.core.selected()];
             slot.scene_start_mark = Some(slot.frame_index);
             return Ok(true);
         }
         if key == self.config.mark_scene_stop {
-            let slot = &mut self.slots[self.active_slot];
-            slot.paused = true;
+            self.core
+                .apply(Command::SetSelectedPause(true))
+                .expect("valid command");
             self.input_state = Some(InputState::TagInput {
                 text: String::new(),
             });
@@ -294,8 +293,10 @@ impl QuadPlayer {
         match key {
             'q' | '\u{1b}' => return Ok(false),
             ' ' => {
-                self.paused = !self.paused;
-                if !self.paused {
+                self.core
+                    .apply(Command::TogglePause)
+                    .expect("valid command");
+                if !self.core.paused() {
                     let now = Instant::now();
                     for slot in &mut self.slots {
                         slot.next_frame_at = Some(now);
@@ -352,8 +353,10 @@ impl QuadPlayer {
     }
 
     pub fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
+        self.core
+            .apply(Command::SetSelectedPause(false))
+            .expect("valid command");
         let slot = &mut self.slots[slot_index];
-        slot.paused = false;
         let start_frame = slot.scene_start_mark.unwrap_or(0);
         let end_frame = slot.frame_index;
         slot.scene_start_mark = None;
@@ -546,7 +549,7 @@ impl QuadPlayer {
             }
         }
 
-        if self.slots[slot_index].paused {
+        if self.core.slot_paused(slot_index).unwrap_or(true) {
             return Ok(());
         }
         self.read_next_frame(slot_index, true)
@@ -633,7 +636,7 @@ impl QuadPlayer {
                 tile_height,
                 RenderOptions {
                     show_help: self.show_help,
-                    paused: self.paused,
+                    paused: self.core.slot_paused(i).unwrap_or(true),
                     fullscreen: self.fullscreen,
                     transition: self.args.transition,
                     transition_ms: self.args.transition_ms,
