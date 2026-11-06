@@ -3,6 +3,33 @@ use anyhow::Result;
 use opencv::{core::Mat, prelude::*, videoio};
 use std::path::Path;
 
+/// Operations needed to perform a transactional seek with a testable backend.
+trait SeekBackend {
+    type Frame;
+    fn seek_frame(&mut self, index: i32) -> Result<()>;
+    fn read_frame(&mut self) -> Result<Option<Self::Frame>>;
+}
+
+fn seek_and_decode<B: SeekBackend>(
+    backend: &mut B,
+    target: i32,
+    next_position: i32,
+) -> Result<B::Frame> {
+    let result = backend
+        .seek_frame(target)
+        .and_then(|()| backend.read_frame())
+        .and_then(|frame| frame.ok_or_else(|| anyhow::anyhow!("Could not read frame after seek")));
+    match result {
+        Ok(frame) => Ok(frame),
+        Err(error) => match backend.seek_frame(next_position) {
+            Ok(()) => Err(error),
+            Err(restore) => {
+                Err(error.context(format!("Could not restore capture position: {restore:#}")))
+            }
+        },
+    }
+}
+
 pub struct Capture {
     handle: videoio::VideoCapture,
     fps: f64,
@@ -53,6 +80,9 @@ impl Capture {
         }
         Ok(())
     }
+    pub fn seek_displayed_frame(&mut self, target: i32, old_position: i32) -> Result<Mat> {
+        seek_and_decode(self, target, old_position.saturating_add(1))
+    }
     pub fn read(&mut self) -> Result<Option<Mat>> {
         let mut frame = Mat::default();
         if self.handle.read(&mut frame)? && !frame.empty() {
@@ -63,9 +93,59 @@ impl Capture {
     }
 }
 
+impl SeekBackend for Capture {
+    type Frame = Mat;
+    fn seek_frame(&mut self, index: i32) -> Result<()> {
+        self.seek(index)
+    }
+    fn read_frame(&mut self) -> Result<Option<Mat>> {
+        self.read()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Fake {
+        position: i32,
+        fail_read: bool,
+        fail_restore: bool,
+    }
+    impl SeekBackend for Fake {
+        type Frame = i32;
+        fn seek_frame(&mut self, index: i32) -> Result<()> {
+            if self.fail_restore && index == 6 {
+                anyhow::bail!("restore rejected");
+            }
+            self.position = index;
+            Ok(())
+        }
+        fn read_frame(&mut self) -> Result<Option<i32>> {
+            if self.fail_read {
+                Ok(None)
+            } else {
+                Ok(Some(self.position))
+            }
+        }
+    }
+    #[test]
+    fn seek_failure_restores_decoder_and_reports_restore_failure() {
+        let mut backend = Fake {
+            position: 6,
+            fail_read: true,
+            fail_restore: false,
+        };
+        assert!(seek_and_decode(&mut backend, 12, 6).is_err());
+        assert_eq!(backend.position, 6);
+        backend.fail_restore = true;
+        assert!(
+            format!("{:#}", seek_and_decode(&mut backend, 12, 6).unwrap_err())
+                .contains("restore rejected")
+        );
+        backend.fail_read = false;
+        assert_eq!(seek_and_decode(&mut backend, 9, 6).unwrap(), 9);
+    }
+
     #[test]
     fn missing_file_is_not_a_capture() {
         assert!(

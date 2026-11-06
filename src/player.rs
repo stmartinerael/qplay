@@ -383,26 +383,9 @@ impl QuadPlayer {
         let slot = &mut self.slots[slot_index];
         if let Some(capture) = &mut slot.capture {
             let old_position = self.core.slot(slot_index).unwrap().position;
-            let result = capture
-                .seek(target)
-                .and_then(|()| capture.read())
-                .and_then(|frame| {
-                    frame.ok_or_else(|| anyhow::anyhow!("Could not read frame after seek"))
-                });
-            match result {
-                Ok(frame) => {
-                    slot.frame = Some(frame);
-                    self.core.seeked(slot_index, target, Instant::now());
-                }
-                Err(error) => {
-                    if let Err(restore) = capture.seek(old_position.saturating_add(1)) {
-                        eprintln!(
-                            "Could not restore capture position after failed seek: {restore:#}"
-                        );
-                    }
-                    return Err(error);
-                }
-            }
+            let frame = capture.seek_displayed_frame(target, old_position)?;
+            slot.frame = Some(frame);
+            self.core.seeked(slot_index, target, Instant::now());
         }
         Ok(())
     }
