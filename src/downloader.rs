@@ -52,7 +52,7 @@ impl Drop for DownloadJob {
 pub fn start_download(url: String) -> DownloadJob {
     start_with(url, PathBuf::from("yt-dlp"))
 }
-fn start_with(url: String, program: PathBuf) -> DownloadJob {
+pub(crate) fn start_with(url: String, program: PathBuf) -> DownloadJob {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);

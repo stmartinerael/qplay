@@ -483,7 +483,6 @@ impl QuadPlayer {
         slot.capture = Some(capture);
         #[cfg(feature = "downloading")]
         {
-            slot.download_job = None;
             slot.downloaded_file = None;
         }
         slot.error = None;
@@ -506,11 +505,16 @@ impl QuadPlayer {
     }
 
     pub fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
-        let previous_frame = self.slots[slot_index].frame.clone();
         #[cfg(feature = "downloading")]
         {
             self.slots[slot_index].download_job = None;
         }
+        self.refill_slot(slot_index)
+    }
+
+    /// Automatic playback replacement must not cancel a pending download.
+    fn refill_slot(&mut self, slot_index: usize) -> Result<()> {
+        let previous_frame = self.slots[slot_index].frame.clone();
         let attempts = self.pool.total_entries().max(1);
         let exclude = self.current_paths(Some(slot_index));
 
@@ -581,7 +585,7 @@ impl QuadPlayer {
 
         if self.slots[slot_index].capture.is_none() {
             return if allow_refill {
-                self.fill_slot(slot_index)
+                self.refill_slot(slot_index)
             } else {
                 Ok(())
             };
@@ -589,7 +593,7 @@ impl QuadPlayer {
         if allow_refill {
             match self.core.frame_action(slot_index, now) {
                 FrameAction::Wait => return Ok(()),
-                FrameAction::Replace => return self.fill_slot(slot_index),
+                FrameAction::Replace => return self.refill_slot(slot_index),
                 FrameAction::Read => {}
             }
         }
@@ -610,7 +614,7 @@ impl QuadPlayer {
         }
 
         if allow_refill {
-            self.fill_slot(slot_index)?;
+            self.refill_slot(slot_index)?;
         }
         Ok(())
     }
@@ -714,6 +718,23 @@ mod tests {
                 .at_2d::<core::Vec3b>(0, 0)?[0],
             before
         );
+        #[cfg(all(feature = "downloading", unix))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let program = dir.path().join("fake-downloader");
+            std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n")?;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+            player.pool = VideoPool::new(vec![VideoEntry::new(path.clone())], false, None);
+            player.slots[0].download_job = Some(crate::downloader::start_with(
+                "https://example.invalid".into(),
+                program,
+            ));
+            player.refill_slot(0)?;
+            assert!(player.slots[0].download_job.is_some());
+            player.fill_slot(0)?;
+            assert!(player.slots[0].download_job.is_none());
+        }
+
         Ok(())
     }
 }
