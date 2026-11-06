@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
+pub mod capture;
 pub mod cli;
 pub mod config;
 pub mod controls;

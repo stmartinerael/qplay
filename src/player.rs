@@ -1,3 +1,4 @@
+use crate::capture::Capture;
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::controls::{self, Action};
@@ -11,7 +12,6 @@ use opencv::{
     core::{self, Mat, Point, Rect},
     highgui, imgproc,
     prelude::*,
-    videoio,
 };
 use rand::Rng;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 pub struct SlotState {
     pub slot_index: usize,
     pub entry: Option<VideoEntry>,
-    pub capture: Option<videoio::VideoCapture>,
+    pub capture: Option<Capture>,
     pub frame: Option<Mat>,
     pub transition_from: Option<Mat>,
     pub transition_started_at: Option<Instant>,
@@ -371,7 +371,7 @@ impl QuadPlayer {
         if let Some(capture) = &mut slot.capture {
             let target =
                 crate::playback::seek_target(slot.frame_index, seconds, slot.fps, slot.frame_count);
-            capture.set(videoio::CAP_PROP_POS_FRAMES, target as f64)?;
+            capture.seek(target)?;
             slot.frame_index = target;
         }
         Ok(())
@@ -410,26 +410,11 @@ impl QuadPlayer {
         entry: VideoEntry,
         previous_frame: Option<Mat>,
     ) -> Result<bool> {
-        let path_str = match entry.path.to_str() {
-            Some(s) => s,
-            None => return Ok(false),
-        };
-
-        let mut capture = match videoio::VideoCapture::from_file(path_str, videoio::CAP_ANY) {
-            Ok(cap) => cap,
-            Err(_) => return Ok(false),
-        };
-
-        if !videoio::VideoCapture::is_opened(&capture)? {
+        let Some(mut capture) = Capture::open(&entry.path)? else {
             return Ok(false);
-        }
-
-        let mut fps = capture.get(videoio::CAP_PROP_FPS)?;
-        if fps <= 1.0 || fps.is_nan() {
-            fps = 30.0;
-        }
-
-        let frame_count = capture.get(videoio::CAP_PROP_FRAME_COUNT)? as i32;
+        };
+        let fps = capture.fps();
+        let frame_count = capture.frame_count();
         let mut clip_start_frame = 0;
         let mut clip_end_frame = None;
 
@@ -440,14 +425,13 @@ impl QuadPlayer {
                 clip_start_frame = self.rng.gen_range(0..=max_start);
             }
             clip_end_frame = Some(clip_start_frame + clip_frames);
-            capture.set(videoio::CAP_PROP_POS_FRAMES, clip_start_frame as f64)?;
+            capture.seek(clip_start_frame)?;
         }
 
         // Validate the first frame before replacing a working slot.
-        let mut first_frame = Mat::default();
-        if !capture.read(&mut first_frame)? || first_frame.empty() {
+        let Some(first_frame) = capture.read()? else {
             return Ok(false);
-        }
+        };
 
         let slot = &mut self.slots[slot_index];
         slot.entry = Some(entry);
@@ -566,19 +550,14 @@ impl QuadPlayer {
             return Ok(());
         }
 
-        let mut frame = Mat::default();
         let start = Instant::now();
-        let success = self.slots[slot_index]
-            .capture
-            .as_mut()
-            .unwrap()
-            .read(&mut frame)?;
+        let frame = self.slots[slot_index].capture.as_mut().unwrap().read()?;
         let elapsed = start.elapsed();
         if elapsed > Duration::from_millis(10) {
             println!("WARN: Slot {} capture read took {:?}", slot_index, elapsed);
         }
 
-        if success {
+        if let Some(frame) = frame {
             let slot = &mut self.slots[slot_index];
             slot.frame = Some(frame);
             slot.frame_index += 1;
