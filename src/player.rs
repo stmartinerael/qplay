@@ -12,13 +12,12 @@ use crate::video::{VideoEntry, VideoPool};
 use anyhow::Result;
 use opencv::core::Mat;
 use rand::Rng;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
 pub struct SlotState {
     pub slot_index: usize,
-    pub entry: Option<VideoEntry>,
     pub capture: Option<Capture>,
     pub frame: Option<Mat>,
     pub transition_from: Option<Mat>,
@@ -34,7 +33,6 @@ impl SlotState {
     pub fn new(slot_index: usize) -> Self {
         Self {
             slot_index,
-            entry: None,
             capture: None,
             frame: None,
             transition_from: None,
@@ -58,21 +56,11 @@ impl SlotState {
         }
     }
 
-    pub fn label(&self) -> String {
-        #[cfg(feature = "downloading")]
-        if self.download_job.is_some() {
-            return "DOWNLOADING...".to_string();
-        }
-        self.entry
-            .as_ref()
-            .map(|e| e.display_name())
-            .unwrap_or_else(|| "[empty]".to_string())
-    }
-
     pub fn to_render_info<'a>(
         &'a self,
         frame_index: i32,
         transition_started_at: Option<Instant>,
+        identity: Option<&'a Path>,
     ) -> SlotRenderInfo<'a> {
         SlotRenderInfo {
             slot_index: self.slot_index,
@@ -80,9 +68,8 @@ impl SlotState {
                 error
             } else if self.is_downloading() {
                 "DOWNLOADING..."
-            } else if let Some(e) = &self.entry {
-                e.path
-                    .file_name()
+            } else if let Some(path) = identity {
+                path.file_name()
                     .and_then(|f| f.to_str())
                     .unwrap_or("[unknown]")
             } else {
@@ -363,8 +350,8 @@ impl QuadPlayer {
         };
         let end_frame = timeline.position;
 
-        if let Some(entry) = &slot.entry {
-            let mut data = load_scenes(&entry.path)?;
+        if let Some(path) = self.core.identity(slot_index) {
+            let mut data = load_scenes(path)?;
             let tags: Vec<String> = tags_text
                 .split_whitespace()
                 .map(|s| s.to_string())
@@ -375,7 +362,7 @@ impl QuadPlayer {
                 tags,
             });
             let total_frames = timeline.frame_count;
-            save_scenes(&entry.path, &data, total_frames)?;
+            save_scenes(path, &data, total_frames)?;
             slot.scene_start_mark = None;
             println!("Scene saved.");
         }
@@ -427,12 +414,12 @@ impl QuadPlayer {
 
     pub fn current_paths(&self, ignored_slot_index: Option<usize>) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        for (i, slot) in self.slots.iter().enumerate() {
+        for i in 0..self.slots.len() {
             if Some(i) == ignored_slot_index {
                 continue;
             }
-            if let Some(entry) = &slot.entry {
-                paths.push(entry.path.clone());
+            if let Some(path) = self.core.identity(i) {
+                paths.push(path.to_path_buf());
             }
         }
         paths
@@ -472,14 +459,13 @@ impl QuadPlayer {
                 slot_index,
                 fps,
                 frame_count,
-                clip_start_frame,
-                clip_end_frame,
+                (clip_start_frame, clip_end_frame),
                 Instant::now(),
+                entry.path,
             )
             .map_err(anyhow::Error::msg)?;
 
         let slot = &mut self.slots[slot_index];
-        slot.entry = Some(entry);
         slot.capture = Some(capture);
         #[cfg(feature = "downloading")]
         {
@@ -532,7 +518,6 @@ impl QuadPlayer {
 
     pub fn release_slot(&mut self, slot_index: usize) -> Result<()> {
         let slot = &mut self.slots[slot_index];
-        slot.entry = None;
         slot.capture = None;
         slot.frame = None;
         slot.transition_from = None;
@@ -629,6 +614,7 @@ impl QuadPlayer {
                 slot.to_render_info(
                     timeline.map_or(0, |s| s.position),
                     timeline.and_then(|s| s.transition_started_at),
+                    self.core.identity(i),
                 )
             })
             .collect();
@@ -709,7 +695,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(player.core.slot(0).unwrap().position, 2);
-        assert_eq!(player.slots[0].entry.as_ref().unwrap().path, path);
+        assert_eq!(player.core.identity(0), Some(path.as_path()));
         assert_eq!(
             player.slots[0]
                 .frame

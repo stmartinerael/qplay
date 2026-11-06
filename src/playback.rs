@@ -1,4 +1,5 @@
 //! Playback calculations independent of input, windowing, and media backends.
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Commands handled entirely by playback policy.
@@ -17,6 +18,7 @@ pub struct PlaybackCore {
     paused: bool,
     slots_paused: [bool; 4],
     slots: [Option<SlotSnapshot>; 4],
+    identities: [Option<PathBuf>; 4],
 }
 
 /// Read-only metadata for the frame currently displayed by a slot.
@@ -62,10 +64,11 @@ impl PlaybackCore {
         index: usize,
         fps: f64,
         frame_count: i32,
-        start: i32,
-        end: Option<i32>,
+        clip: (i32, Option<i32>),
         now: Instant,
+        identity: PathBuf,
     ) -> Result<(), &'static str> {
+        let (start, end) = clip;
         if index >= self.slots.len()
             || !fps.is_finite()
             || fps <= 0.0
@@ -76,6 +79,7 @@ impl PlaybackCore {
         {
             return Err("invalid slot metadata");
         }
+        self.identities[index] = Some(identity);
         self.slots[index] = Some(SlotSnapshot {
             fps,
             frame_count,
@@ -87,6 +91,9 @@ impl PlaybackCore {
         });
         Ok(())
     }
+    pub fn identity(&self, index: usize) -> Option<&Path> {
+        self.identities.get(index).and_then(Option::as_deref)
+    }
     pub fn start_transition(&mut self, index: usize, now: Instant) {
         if let Some(Some(slot)) = self.slots.get_mut(index) {
             slot.transition_started_at = Some(now);
@@ -95,6 +102,7 @@ impl PlaybackCore {
     pub fn clear(&mut self, index: usize) {
         if let Some(slot) = self.slots.get_mut(index) {
             *slot = None;
+            self.identities[index] = None;
         }
     }
     pub fn resume_at(&mut self, now: Instant) {
@@ -210,11 +218,16 @@ mod tests {
         let now = Instant::now();
         let mut core = PlaybackCore::default();
         assert_eq!(core.frame_action(0, now), FrameAction::Replace);
-        core.opened(0, 10.0, 20, 4, Some(6), now).unwrap();
+        core.opened(0, 10.0, 20, (4, Some(6)), now, "one".into())
+            .unwrap();
         assert_eq!(core.slot(0).unwrap().position, 4);
         let original = core.slot(0);
-        assert!(core.opened(0, f64::NAN, 20, 0, None, now).is_err());
+        assert!(
+            core.opened(0, f64::NAN, 20, (0, None), now, "bad".into())
+                .is_err()
+        );
         assert_eq!(core.slot(0), original);
+        assert_eq!(core.identity(0), Some(Path::new("one")));
         assert_eq!(core.frame_action(0, now), FrameAction::Read);
         core.frame_read(0, now);
         assert_eq!(core.slot(0).unwrap().position, 5);
