@@ -29,6 +29,7 @@ pub struct SlotSnapshot {
     /// Exclusive clip end.
     pub clip_end: Option<i32>,
     pub next_frame_at: Instant,
+    pub transition_started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +83,14 @@ impl PlaybackCore {
             clip_start: start,
             clip_end: end,
             next_frame_at: now,
+            transition_started_at: None,
         });
         Ok(())
+    }
+    pub fn start_transition(&mut self, index: usize, now: Instant) {
+        if let Some(Some(slot)) = self.slots.get_mut(index) {
+            slot.transition_started_at = Some(now);
+        }
     }
     pub fn clear(&mut self, index: usize) {
         if let Some(slot) = self.slots.get_mut(index) {
@@ -142,6 +149,14 @@ impl PlaybackCore {
             .get(index)
             .map(|paused| self.paused || *paused)
     }
+}
+
+/// Fade progress for an explicit time, clamped to the transition interval.
+pub fn transition_progress(started: Instant, now: Instant, duration: Duration) -> f64 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    (now.saturating_duration_since(started).as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0)
 }
 
 /// Seek to a nonnegative frame, bounded by the last frame when the count is known.
@@ -218,6 +233,32 @@ mod tests {
         assert_eq!(core.slot(0).unwrap().position, 5); // a failed seek never commits
         core.seeked(0, target, now);
         assert_eq!(core.slot(0).unwrap().position, 0);
+    }
+
+    #[test]
+    fn transition_progress_is_bounded_and_uses_supplied_time() {
+        let start = Instant::now();
+        assert_eq!(
+            transition_progress(start, start, Duration::from_millis(200)),
+            0.0
+        );
+        assert_eq!(
+            transition_progress(
+                start,
+                start + Duration::from_millis(100),
+                Duration::from_millis(200)
+            ),
+            0.5
+        );
+        assert_eq!(
+            transition_progress(
+                start,
+                start + Duration::from_secs(1),
+                Duration::from_millis(200)
+            ),
+            1.0
+        );
+        assert_eq!(transition_progress(start, start, Duration::ZERO), 1.0);
     }
 
     #[test]

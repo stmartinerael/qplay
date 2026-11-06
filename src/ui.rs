@@ -387,14 +387,15 @@ pub fn render_transition_frame(
         return Ok(current);
     };
 
-    let elapsed = Instant::now().saturating_duration_since(started_at);
-    if elapsed >= Duration::from_millis(transition_ms) {
+    let alpha = crate::playback::transition_progress(
+        started_at,
+        Instant::now(),
+        Duration::from_millis(transition_ms),
+    );
+    if alpha >= 1.0 {
         return Ok(current);
     }
-
     let previous = fill_frame(previous_frame, width, height)?;
-    let progress = elapsed.as_secs_f64() / Duration::from_millis(transition_ms).as_secs_f64();
-    let alpha = progress.clamp(0.0, 1.0);
     let beta = 1.0 - alpha;
     let mut blended = Mat::default();
     core::add_weighted(&current, alpha, &previous, beta, 0.0, &mut blended, -1)?;

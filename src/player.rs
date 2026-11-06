@@ -22,7 +22,6 @@ pub struct SlotState {
     pub capture: Option<Capture>,
     pub frame: Option<Mat>,
     pub transition_from: Option<Mat>,
-    pub transition_started_at: Option<Instant>,
     #[cfg(feature = "downloading")]
     pub download_job: Option<DownloadJob>,
     #[cfg(feature = "downloading")]
@@ -39,7 +38,6 @@ impl SlotState {
             capture: None,
             frame: None,
             transition_from: None,
-            transition_started_at: None,
             #[cfg(feature = "downloading")]
             download_job: None,
             #[cfg(feature = "downloading")]
@@ -71,7 +69,11 @@ impl SlotState {
             .unwrap_or_else(|| "[empty]".to_string())
     }
 
-    pub fn to_render_info<'a>(&'a self, frame_index: i32) -> SlotRenderInfo<'a> {
+    pub fn to_render_info<'a>(
+        &'a self,
+        frame_index: i32,
+        transition_started_at: Option<Instant>,
+    ) -> SlotRenderInfo<'a> {
         SlotRenderInfo {
             slot_index: self.slot_index,
             label: if let Some(error) = &self.error {
@@ -89,7 +91,7 @@ impl SlotState {
             frame_index,
             frame: self.frame.as_ref(),
             transition_from: self.transition_from.as_ref(),
-            transition_started_at: self.transition_started_at,
+            transition_started_at,
         }
     }
 }
@@ -487,7 +489,6 @@ impl QuadPlayer {
         slot.error = None;
         slot.frame = Some(first_frame);
         slot.transition_from = None;
-        slot.transition_started_at = None;
 
         if self.slots[slot_index].frame.is_some() {
             if self.args.transition == TransitionMode::Fade
@@ -496,7 +497,7 @@ impl QuadPlayer {
             {
                 let slot = &mut self.slots[slot_index];
                 slot.transition_from = previous_frame;
-                slot.transition_started_at = Some(Instant::now());
+                self.core.start_transition(slot_index, Instant::now());
             }
             return Ok(true);
         }
@@ -531,7 +532,6 @@ impl QuadPlayer {
         slot.capture = None;
         slot.frame = None;
         slot.transition_from = None;
-        slot.transition_started_at = None;
         self.core.clear(slot_index);
         #[cfg(feature = "downloading")]
         {
@@ -620,7 +620,13 @@ impl QuadPlayer {
             .slots
             .iter()
             .enumerate()
-            .map(|(i, slot)| slot.to_render_info(self.core.slot(i).map_or(0, |slot| slot.position)))
+            .map(|(i, slot)| {
+                let timeline = self.core.slot(i);
+                slot.to_render_info(
+                    timeline.map_or(0, |s| s.position),
+                    timeline.and_then(|s| s.transition_started_at),
+                )
+            })
             .collect();
         let options: Vec<_> = (0..4)
             .map(|i| RenderOptions {
