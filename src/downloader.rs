@@ -1,8 +1,10 @@
 //! Cancellable downloads and ownership of their temporary files.
 use anyhow::{Context, Result, bail};
 use rand::Rng;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     Arc,
@@ -82,7 +84,10 @@ fn download_sync(url: &str, program: &Path, cancelled: &AtomicBool) -> Result<Do
         path: directory.join("video.mp4"),
         directory,
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .arg("-f")
         .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
         .arg("-o")
@@ -96,11 +101,17 @@ fn download_sync(url: &str, program: &Path, cancelled: &AtomicBool) -> Result<Do
         .context("Failed to execute yt-dlp. Is it installed?")?;
     loop {
         if cancelled.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_child(&mut child);
             bail!("download cancelled");
         }
-        if let Some(status) = child.try_wait()? {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                stop_child(&mut child);
+                return Err(error.into());
+            }
+        };
+        if let Some(status) = status {
             if !status.success() {
                 bail!("yt-dlp exited with {status}");
             }
@@ -111,6 +122,21 @@ fn download_sync(url: &str, program: &Path, cancelled: &AtomicBool) -> Result<Do
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn stop_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // The downloader was started as the leader of a new process group.
+        // Kill its helpers as well, then reap the direct child below.
+        if let Ok(pid) = i32::try_from(child.id()) {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -165,6 +191,43 @@ mod tests {
         let pid = std::fs::read_to_string(marker).unwrap();
         drop(job);
         assert!(!Path::new("/proc").join(pid).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancellation_stops_downloader_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("fake-downloader");
+        let marker = dir.path().join("helper-pid");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let job = start_with("https://example.invalid".into(), program);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let pid = std::fs::read_to_string(marker).unwrap();
+        drop(job);
+        let status = Path::new("/proc").join(pid).join("status");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::read_to_string(&status) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Ok(text) if text.lines().any(|line| line.starts_with("State:\tZ")) => break,
+                _ if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                _ => panic!("download helper is still running"),
+            }
+        }
     }
 
     #[test]
