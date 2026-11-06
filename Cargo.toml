@@ -3,6 +3,11 @@ name = "qplay"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["downloading", "scene-editing"]
+downloading = []
+scene-editing = []
+
 [dependencies]
 opencv = "0.101"
 clap = { version = "4.5", features = ["derive"] }

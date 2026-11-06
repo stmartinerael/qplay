@@ -12,9 +12,11 @@ pub mod capture;
 pub mod cli;
 pub mod config;
 pub mod controls;
+#[cfg(feature = "downloading")]
 pub mod downloader;
 pub mod playback;
 pub mod player;
+#[cfg(feature = "scene-editing")]
 pub mod scenes;
 pub mod ui;
 pub mod video;

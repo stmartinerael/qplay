@@ -14,6 +14,8 @@ cargo run -- --help
 
 The default window is 1280×720. `--width` and `--height` must be at least 240 and 160 respectively. Use `--fullscreen`, `--clip-seconds`, `--seed`, `--transition cut|fade`, and `--transition-ms` to adjust playback. `--clip-seconds` must be finite and non-negative. URL downloads require `yt-dlp` on PATH. Existing playback continues during a download. Replacing a pending download cancels it; downloaded temporary files are removed when replaced or when qplay closes.
 
+Both optional services are enabled by default. Build local-only playback with `cargo build --no-default-features`, or enable either service individually with `--features downloading` or `--features scene-editing`. Local path loading remains available without downloading; URL input reports an error. Scene marking keys are inactive without scene editing.
+
 ## Controls
 
 | Key | Action |

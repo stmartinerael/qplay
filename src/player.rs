@@ -2,8 +2,10 @@ use crate::capture::Capture;
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::controls::{self, Action};
+#[cfg(feature = "downloading")]
 use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, PlaybackCore};
+#[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, put_text, render_slot};
 use crate::video::{VideoEntry, VideoPool};
@@ -31,7 +33,9 @@ pub struct SlotState {
     pub clip_start_frame: i32,
     pub clip_end_frame: Option<i32>,
     pub next_frame_at: Option<Instant>,
+    #[cfg(feature = "downloading")]
     pub download_job: Option<DownloadJob>,
+    #[cfg(feature = "downloading")]
     downloaded_file: Option<DownloadedFile>,
     error: Option<String>,
     pub scene_start_mark: Option<i32>,
@@ -52,14 +56,28 @@ impl SlotState {
             clip_start_frame: 0,
             clip_end_frame: None,
             next_frame_at: None,
+            #[cfg(feature = "downloading")]
             download_job: None,
+            #[cfg(feature = "downloading")]
             downloaded_file: None,
             error: None,
             scene_start_mark: None,
         }
     }
 
+    fn is_downloading(&self) -> bool {
+        #[cfg(feature = "downloading")]
+        {
+            self.download_job.is_some()
+        }
+        #[cfg(not(feature = "downloading"))]
+        {
+            false
+        }
+    }
+
     pub fn label(&self) -> String {
+        #[cfg(feature = "downloading")]
         if self.download_job.is_some() {
             return "DOWNLOADING...".to_string();
         }
@@ -74,7 +92,7 @@ impl SlotState {
             slot_index: self.slot_index,
             label: if let Some(error) = &self.error {
                 error
-            } else if self.download_job.is_some() {
+            } else if self.is_downloading() {
                 "DOWNLOADING..."
             } else if let Some(e) = &self.entry {
                 e.path
@@ -322,9 +340,14 @@ impl QuadPlayer {
 
     pub fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
         if url.starts_with("http://") || url.starts_with("https://") {
-            let job = downloader::start_download(url);
-            self.slots[slot_index].download_job = Some(job);
-            self.slots[slot_index].error = None;
+            #[cfg(feature = "downloading")]
+            {
+                let job = downloader::start_download(url);
+                self.slots[slot_index].download_job = Some(job);
+                self.slots[slot_index].error = None;
+            }
+            #[cfg(not(feature = "downloading"))]
+            anyhow::bail!("URL downloads are disabled in this build");
         } else {
             // Treat as local file
             self.load_file_into_slot(slot_index, PathBuf::from(url))?;
@@ -333,7 +356,10 @@ impl QuadPlayer {
     }
 
     pub fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
-        self.slots[slot_index].download_job = None;
+        #[cfg(feature = "downloading")]
+        {
+            self.slots[slot_index].download_job = None;
+        }
         let entry = VideoEntry::new(path);
         let previous_frame = self.slots[slot_index].frame.clone();
         if self.open_entry_in_slot(slot_index, entry, previous_frame)? {
@@ -343,6 +369,7 @@ impl QuadPlayer {
         }
     }
 
+    #[cfg(feature = "scene-editing")]
     pub fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
         let slot = &mut self.slots[slot_index];
         let start_frame = slot.scene_start_mark.unwrap_or(0);
@@ -365,6 +392,11 @@ impl QuadPlayer {
             println!("Scene saved.");
         }
         Ok(())
+    }
+
+    #[cfg(not(feature = "scene-editing"))]
+    fn finish_scene(&mut self, _slot_index: usize, _tags_text: String) -> Result<()> {
+        anyhow::bail!("Scene editing is disabled in this build")
     }
 
     pub fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
@@ -442,8 +474,11 @@ impl QuadPlayer {
         let slot = &mut self.slots[slot_index];
         slot.entry = Some(entry);
         slot.capture = Some(capture);
-        slot.download_job = None;
-        slot.downloaded_file = None;
+        #[cfg(feature = "downloading")]
+        {
+            slot.download_job = None;
+            slot.downloaded_file = None;
+        }
         slot.error = None;
         slot.fps = fps;
         slot.frame_count = frame_count;
@@ -472,7 +507,10 @@ impl QuadPlayer {
 
     pub fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
         let previous_frame = self.slots[slot_index].frame.clone();
-        self.slots[slot_index].download_job = None;
+        #[cfg(feature = "downloading")]
+        {
+            self.slots[slot_index].download_job = None;
+        }
         let attempts = self.pool.total_entries().max(1);
         let exclude = self.current_paths(Some(slot_index));
 
@@ -499,25 +537,35 @@ impl QuadPlayer {
         slot.clip_start_frame = 0;
         slot.clip_end_frame = None;
         slot.next_frame_at = None;
-        slot.download_job = None;
-        slot.downloaded_file = None;
+        #[cfg(feature = "downloading")]
+        {
+            slot.download_job = None;
+            slot.downloaded_file = None;
+        }
         slot.error = None;
         slot.scene_start_mark = None;
         Ok(())
     }
 
     pub fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
+        #[cfg(feature = "downloading")]
         if let Some(job) = &self.slots[slot_index].download_job {
             match job.poll() {
                 Ok(Some(file)) => {
-                    self.slots[slot_index].download_job = None;
+                    #[cfg(feature = "downloading")]
+                    {
+                        self.slots[slot_index].download_job = None;
+                    }
                     let path = file.path().to_owned();
                     self.load_file_into_slot(slot_index, path)?;
                     self.slots[slot_index].downloaded_file = Some(file);
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.slots[slot_index].download_job = None;
+                    #[cfg(feature = "downloading")]
+                    {
+                        self.slots[slot_index].download_job = None;
+                    }
                     return Err(error);
                 }
             }

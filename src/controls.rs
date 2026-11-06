@@ -34,11 +34,17 @@ pub fn translate(key: char, bindings: &Keybindings) -> Option<Action> {
         (bindings.seek_forward_active, Action::Seek(5)),
         (bindings.seek_backward_active, Action::Seek(-5)),
         (bindings.load_video, Action::Load),
-        (bindings.mark_scene_start, Action::SceneStart),
-        (bindings.mark_scene_stop, Action::SceneStop),
     ] {
         if key == candidate {
             return Some(action);
+        }
+    }
+    if cfg!(feature = "scene-editing") {
+        if key == bindings.mark_scene_start {
+            return Some(Action::SceneStart);
+        }
+        if key == bindings.mark_scene_stop {
+            return Some(Action::SceneStop);
         }
     }
     match key {
