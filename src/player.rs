@@ -425,12 +425,14 @@ impl QuadPlayer {
         let (fps, count, clip, frame) = match prepared {
             Ok(Some(result)) => result,
             Ok(None) => {
+                self.captures.discard_candidate(slot_index);
                 self.core
                     .open_result(slot_index, id, None, Instant::now())
                     .map_err(anyhow::Error::msg)?;
                 return Ok(false);
             }
             Err(error) => {
+                self.captures.discard_candidate(slot_index);
                 self.core
                     .open_result(slot_index, id, None, Instant::now())
                     .map_err(anyhow::Error::msg)?;

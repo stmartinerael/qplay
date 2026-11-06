@@ -31,8 +31,8 @@ Both optional services are enabled by default. Build local-only playback with `c
 | c / r | Replace all slots / reshuffle |
 | t / f / h | Change transition / fullscreen / help |
 
-Customizable keys are stored in the platform configuration directory under `qplay/keybindings.json`. Scene annotations are stored beside the video as `<filename>.scenes.json`. Malformed scene data is reported and is not replaced by an empty scene list. Sidecars are written through a temporary file and renamed into place. Playback operation errors appear in the affected tile and in the terminal.
+Customizable keys are stored in the platform configuration directory under `qplay/keybindings.json`. Scene annotations are stored beside the video as `<filename>.scenes.json`. Malformed scene data is reported and is not replaced by an empty scene list. Sidecars are written through a temporary file and renamed into place. Playback operation errors appear in the affected tile and in the terminal. A failed replacement or seek retains the previously displayed frame and slot identity. If a decoder cannot restore its position after a failed seek, the error explicitly reports that failure.
 
 ## Development
 
-Run `cargo fmt --check`, `cargo test`, and `cargo clippy`. The implemented boundaries and remaining work are described in [docs/module-contracts.md](docs/module-contracts.md). Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.
+Run `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`, and `cargo test --no-default-features`. Test each optional feature with `cargo test --no-default-features --features downloading` and `cargo test --no-default-features --features scene-editing`. The module boundaries and operation contracts are described in [docs/module-contracts.md](docs/module-contracts.md). Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.

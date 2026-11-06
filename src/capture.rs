@@ -112,6 +112,7 @@ pub struct CaptureService {
 }
 impl CaptureService {
     pub fn prepare(&mut self, slot: usize, path: &Path) -> Result<Option<(f64, i32)>> {
+        self.candidate[slot] = None;
         self.candidate[slot] = Capture::open(path)?;
         Ok(self.candidate[slot]
             .as_ref()
@@ -128,6 +129,9 @@ impl CaptureService {
             .as_mut()
             .expect("candidate prepared")
             .read()
+    }
+    pub fn discard_candidate(&mut self, slot: usize) {
+        self.candidate[slot] = None;
     }
     pub fn commit(&mut self, slot: usize) {
         self.current[slot] = self.candidate[slot].take();
