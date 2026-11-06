@@ -29,6 +29,7 @@ impl Drop for DownloadedFile {
 pub struct DownloadJob {
     rx: Receiver<Result<DownloadedFile>>,
     cancelled: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 impl DownloadJob {
     pub fn poll(&self) -> Result<Option<DownloadedFile>> {
@@ -42,6 +43,9 @@ impl DownloadJob {
 impl Drop for DownloadJob {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -52,12 +56,16 @@ fn start_with(url: String, program: PathBuf) -> DownloadJob {
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
-    thread::spawn(move || {
+    let worker = thread::spawn(move || {
         let result = download_sync(&url, &program, &worker_cancelled);
         // An unreceived successful result is dropped here and removes its directory.
         let _ = tx.send(result);
     });
-    DownloadJob { rx, cancelled }
+    DownloadJob {
+        rx,
+        cancelled,
+        worker: Some(worker),
+    }
 }
 fn download_sync(url: &str, program: &Path, cancelled: &AtomicBool) -> Result<DownloadedFile> {
     let base = std::env::temp_dir().join("qplay_downloads");
@@ -131,6 +139,32 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"media");
         drop(file);
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_job_terminates_and_reaps_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("fake-downloader");
+        let marker = dir.path().join("pid");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let job = start_with("https://example.invalid".into(), program);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let pid = std::fs::read_to_string(marker).unwrap();
+        drop(job);
+        assert!(!Path::new("/proc").join(pid).exists());
     }
 
     #[test]
