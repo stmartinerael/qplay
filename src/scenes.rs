@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -33,8 +34,30 @@ pub fn save_scenes(video_path: &Path, data: &SceneData, total_frames: i32) -> Re
 
     let sidecar_path = get_sidecar_path(video_path);
     let json = serde_json::to_string_pretty(data)?;
-    fs::write(sidecar_path, json).context("Failed to write scene data")?;
-    Ok(())
+    // Write beside the destination so rename is atomic on the same filesystem.
+    let temp_path = sidecar_path.with_file_name(format!(
+        ".{}.{}.tmp",
+        sidecar_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+        rand::random::<u64>()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .context("Failed to create temporary scene data")?;
+    let result = (|| -> Result<()> {
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp_path, &sidecar_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.context("Failed to write scene data")
 }
 
 pub fn load_scenes(video_path: &Path) -> Result<SceneData> {
@@ -111,6 +134,30 @@ mod tests {
             tags: vec![],
         });
         assert!(save_scenes(path, &data, 100).is_err());
+    }
+
+    #[test]
+    fn invalid_update_keeps_existing_sidecar() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("video.mp4");
+        let original = SceneData {
+            scenes: vec![Scene {
+                start_frame: 1,
+                end_frame: 5,
+                tags: vec![],
+            }],
+        };
+        save_scenes(&path, &original, 10)?;
+        let invalid = SceneData {
+            scenes: vec![Scene {
+                start_frame: 8,
+                end_frame: 2,
+                tags: vec![],
+            }],
+        };
+        assert!(save_scenes(&path, &invalid, 10).is_err());
+        assert_eq!(load_scenes(&path)?, original);
+        Ok(())
     }
 
     #[test]

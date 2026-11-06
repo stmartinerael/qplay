@@ -365,7 +365,6 @@ impl QuadPlayer {
         let slot = &mut self.slots[slot_index];
         let start_frame = slot.scene_start_mark.unwrap_or(0);
         let end_frame = slot.frame_index;
-        slot.scene_start_mark = None;
 
         if let Some(entry) = &slot.entry {
             let mut data = load_scenes(&entry.path)?;
@@ -380,6 +379,7 @@ impl QuadPlayer {
             });
             let total_frames = slot.frame_count;
             save_scenes(&entry.path, &data, total_frames)?;
+            slot.scene_start_mark = None;
             println!("Scene saved.");
         }
         Ok(())

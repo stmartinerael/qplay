@@ -108,6 +108,31 @@ fn download_sync(url: &str, program: &Path, cancelled: &AtomicBool) -> Result<Do
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn successful_download_is_removed_when_result_is_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("fake-downloader");
+        std::fs::write(&program, "#!/bin/sh\nprintf media > \"$4\"\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let job = start_with("https://example.invalid".into(), program);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let file = loop {
+            match job.poll().unwrap() {
+                Some(file) => break file,
+                None if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                None => panic!("download timed out"),
+            }
+        };
+        let path = file.path().to_owned();
+        assert_eq!(std::fs::read(&path).unwrap(), b"media");
+        drop(file);
+        assert!(!path.exists());
+    }
+
     #[test]
     fn missing_downloader_reports_failure_without_network() {
         let job = start_with(
