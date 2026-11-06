@@ -5,12 +5,63 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Commands handled entirely by playback policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Select(usize),
     TogglePause,
     ToggleSelectedPause,
     SetSelectedPause(bool),
+    Tick {
+        slot: usize,
+        now: Instant,
+    },
+    Seek {
+        slot: usize,
+        seconds: f64,
+        now: Instant,
+    },
+    Replace {
+        slot: usize,
+        path: PathBuf,
+        now: Instant,
+    },
+    EndOfMedia {
+        slot: usize,
+        now: Instant,
+    },
+    ToggleTransition,
+}
+
+/// Operations for the capture coordinator; ids are scoped to the slot.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    None,
+    Replace {
+        slot: usize,
+    },
+    Open {
+        slot: usize,
+        id: u64,
+        path: PathBuf,
+    },
+    Seek {
+        slot: usize,
+        id: u64,
+        target: i32,
+        old_position: i32,
+    },
+    Read {
+        slot: usize,
+        id: u64,
+    },
+}
+type OpenMetadata = (f64, i32, (i32, Option<i32>), PathBuf);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Open(u64),
+    Seek(u64, i32),
+    Read(u64),
 }
 
 /// Playback decisions, independent of video decoding and windowing.
@@ -23,6 +74,9 @@ pub struct PlaybackCore {
     slots: [Option<SlotSnapshot>; 4],
     identities: [Option<PathBuf>; 4],
     requests: [u64; 4],
+    operations: [u64; 4],
+    pending: [Option<Pending>; 4],
+    fade: bool,
 }
 
 /// Read-only metadata for the frame currently displayed by a slot.
@@ -65,6 +119,9 @@ impl PlaybackCore {
             slots: [None; 4],
             identities: Default::default(),
             requests: [0; 4],
+            operations: [0; 4],
+            pending: [None; 4],
+            fade: true,
         }
     }
     pub fn reshuffle(&mut self) {
@@ -98,7 +155,18 @@ impl PlaybackCore {
         };
         (start, Some(start.saturating_add(frames)))
     }
-    pub fn apply(&mut self, command: Command) -> Result<(), &'static str> {
+    fn operation(&mut self, slot: usize) -> Result<u64, &'static str> {
+        let id = self.operations.get_mut(slot).ok_or("invalid slot index")?;
+        *id = id.checked_add(1).ok_or("operation identity exhausted")?;
+        Ok(*id)
+    }
+    pub fn set_fade(&mut self, fade: bool) {
+        self.fade = fade;
+    }
+    pub fn fade(&self) -> bool {
+        self.fade
+    }
+    pub fn apply(&mut self, command: Command) -> Result<Effect, &'static str> {
         match command {
             Command::Select(index) if index < self.slots_paused.len() => self.selected = index,
             Command::Select(_) => return Err("invalid slot index"),
@@ -107,8 +175,100 @@ impl PlaybackCore {
                 self.slots_paused[self.selected] = !self.slots_paused[self.selected]
             }
             Command::SetSelectedPause(paused) => self.slots_paused[self.selected] = paused,
+            Command::ToggleTransition => self.fade = !self.fade,
+            Command::Replace { slot, path, now: _ } => {
+                let id = self.operation(slot)?;
+                self.pending[slot] = Some(Pending::Open(id));
+                return Ok(Effect::Open { slot, id, path });
+            }
+            Command::Seek {
+                slot,
+                seconds,
+                now: _,
+            } => {
+                if slot >= self.slots.len() || !seconds.is_finite() {
+                    return Err("invalid seek");
+                }
+                let Some(snapshot) = self.slot(slot) else {
+                    return Ok(Effect::None);
+                };
+                let target = seek_target(
+                    snapshot.position,
+                    seconds,
+                    snapshot.fps,
+                    snapshot.frame_count,
+                );
+                let id = self.operation(slot)?;
+                self.pending[slot] = Some(Pending::Seek(id, target));
+                return Ok(Effect::Seek {
+                    slot,
+                    id,
+                    target,
+                    old_position: snapshot.position,
+                });
+            }
+            Command::Tick { slot, now } => {
+                if slot >= self.slots.len() {
+                    return Err("invalid slot index");
+                }
+                match self.frame_action(slot, now) {
+                    FrameAction::Wait => {}
+                    FrameAction::Replace => return Ok(Effect::Replace { slot }),
+                    FrameAction::Read => {
+                        let id = self.operation(slot)?;
+                        self.pending[slot] = Some(Pending::Read(id));
+                        return Ok(Effect::Read { slot, id });
+                    }
+                }
+            }
+            Command::EndOfMedia { slot, now: _ } => {
+                if slot >= self.slots.len() {
+                    return Err("invalid slot index");
+                }
+                return Ok(Effect::Replace { slot });
+            }
         }
-        Ok(())
+        Ok(Effect::None)
+    }
+    pub fn open_result(
+        &mut self,
+        slot: usize,
+        id: u64,
+        result: Option<OpenMetadata>,
+        now: Instant,
+    ) -> Result<bool, &'static str> {
+        if self.pending.get(slot).copied().flatten() != Some(Pending::Open(id)) {
+            return Ok(false);
+        }
+        self.pending[slot] = None;
+        if let Some((fps, count, clip, path)) = result {
+            self.opened(slot, fps, count, clip, now, path)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    pub fn seek_result(&mut self, slot: usize, id: u64, success: bool, now: Instant) -> bool {
+        let Some(Some(Pending::Seek(pending_id, target))) = self.pending.get(slot).copied() else {
+            return false;
+        };
+        if pending_id != id {
+            return false;
+        }
+        self.pending[slot] = None;
+        if success {
+            self.seeked(slot, target, now);
+        }
+        success
+    }
+    pub fn read_result(&mut self, slot: usize, id: u64, success: bool, now: Instant) -> bool {
+        if self.pending.get(slot).copied().flatten() != Some(Pending::Read(id)) {
+            return false;
+        }
+        self.pending[slot] = None;
+        if success {
+            self.frame_read(slot, now);
+        }
+        success
     }
     pub fn slot(&self, index: usize) -> Option<SlotSnapshot> {
         self.slots.get(index).copied().flatten()
@@ -170,6 +330,7 @@ impl PlaybackCore {
         if let Some(slot) = self.slots.get_mut(index) {
             *slot = None;
             self.identities[index] = None;
+            self.pending[index] = None;
         }
     }
     pub fn resume_at(&mut self, now: Instant) {
@@ -277,6 +438,98 @@ mod tests {
         }
         assert_eq!(a.clip_bounds(0.0, 10.0, 100), (0, None));
         assert!(a.next_entry(4).is_none());
+    }
+
+    #[test]
+    fn effects_reject_stale_and_failed_results_without_mutating_display() {
+        let mut core = PlaybackCore::default();
+        let now = Instant::now();
+        let open = |core: &mut PlaybackCore, name: &str| match core
+            .apply(Command::Replace {
+                slot: 0,
+                path: name.into(),
+                now,
+            })
+            .unwrap()
+        {
+            Effect::Open { id, .. } => id,
+            _ => unreachable!(),
+        };
+        let stale = open(&mut core, "old");
+        let current = open(&mut core, "new");
+        assert!(
+            !core
+                .open_result(0, stale, Some((10.0, 20, (0, None), "old".into())), now)
+                .unwrap()
+        );
+        assert!(
+            core.open_result(0, current, Some((10.0, 20, (0, None), "new".into())), now)
+                .unwrap()
+        );
+        let before = core.slot(0);
+        let failed = open(&mut core, "bad");
+        assert!(!core.open_result(0, failed, None, now).unwrap());
+        assert_eq!(core.slot(0), before);
+        assert_eq!(core.identity(0), Some(Path::new("new")));
+        core.apply(Command::TogglePause).unwrap();
+        let id = match core
+            .apply(Command::Seek {
+                slot: 0,
+                seconds: 1.0,
+                now,
+            })
+            .unwrap()
+        {
+            Effect::Seek { id, target: 10, .. } => id,
+            _ => panic!("expected seek"),
+        };
+        assert!(!core.seek_result(0, id, false, now));
+        assert_eq!(core.slot(0), before);
+        assert!(
+            core.apply(Command::Seek {
+                slot: 4,
+                seconds: 1.0,
+                now
+            })
+            .is_err()
+        );
+        assert!(
+            core.apply(Command::Seek {
+                slot: 0,
+                seconds: f64::NAN,
+                now
+            })
+            .is_err()
+        );
+        assert_eq!(
+            core.apply(Command::Tick {
+                slot: 0,
+                now: now + Duration::from_secs(1)
+            })
+            .unwrap(),
+            Effect::None
+        );
+        core.apply(Command::TogglePause).unwrap();
+        let id = match core
+            .apply(Command::Tick {
+                slot: 0,
+                now: now + Duration::from_secs(1),
+            })
+            .unwrap()
+        {
+            Effect::Read { id, .. } => id,
+            _ => panic!("expected read"),
+        };
+        assert!(!core.read_result(0, id + 1, true, now));
+        assert!(core.read_result(0, id, true, now));
+        assert_eq!(core.slot(0).unwrap().position, 1);
+        assert_eq!(
+            core.apply(Command::EndOfMedia { slot: 0, now }).unwrap(),
+            Effect::Replace { slot: 0 }
+        );
+        let fade = core.fade();
+        core.apply(Command::ToggleTransition).unwrap();
+        assert_ne!(core.fade(), fade);
     }
 
     #[test]

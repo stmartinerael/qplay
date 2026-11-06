@@ -4,7 +4,7 @@ use crate::config::Keybindings;
 use crate::controls::{self, Action};
 #[cfg(feature = "downloading")]
 use crate::downloader::{self, DownloadJob, DownloadedFile};
-use crate::playback::{Command, FrameAction, PlaybackCore};
+use crate::playback::{Command, Effect, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{self, MosaicOptions, RenderOptions};
@@ -92,7 +92,8 @@ impl QuadPlayer {
         config: Keybindings,
     ) -> Result<Self> {
         let fullscreen = args.fullscreen;
-        let core = PlaybackCore::new(entries, !args.no_shuffle, args.seed);
+        let mut core = PlaybackCore::new(entries, !args.no_shuffle, args.seed);
+        core.set_fade(args.transition == TransitionMode::Fade);
 
         let mut slots = Vec::with_capacity(4);
         for _ in 0..4 {
@@ -219,12 +220,13 @@ impl QuadPlayer {
 
         match controls::translate(key, &self.config) {
             Some(Action::Select(index)) => {
-                self.core.apply(Command::Select(index)).expect("valid slot")
+                self.core.apply(Command::Select(index)).expect("valid slot");
             }
-            Some(Action::ToggleSlotPause) => self
-                .core
-                .apply(Command::ToggleSelectedPause)
-                .expect("valid command"),
+            Some(Action::ToggleSlotPause) => {
+                self.core
+                    .apply(Command::ToggleSelectedPause)
+                    .expect("valid command");
+            }
             Some(Action::Seek(seconds)) => {
                 self.seek_slot(self.core.selected(), f64::from(seconds))?
             }
@@ -273,7 +275,11 @@ impl QuadPlayer {
                 self.fullscreen = !self.fullscreen;
                 self.apply_window_mode()?;
             }
-            Some(Action::Transition) => self.args.transition = self.args.transition.next(),
+            Some(Action::Transition) => {
+                self.core
+                    .apply(Command::ToggleTransition)
+                    .expect("valid command");
+            }
             None => {}
         }
         Ok(true)
@@ -345,14 +351,33 @@ impl QuadPlayer {
     }
 
     fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
-        let Some(target) = self.core.seek_target(slot_index, seconds) else {
-            return Ok(());
-        };
-        if self.captures.has_capture(slot_index) {
-            let old_position = self.core.slot(slot_index).unwrap().position;
-            let frame = self.captures.seek(slot_index, target, old_position)?;
-            self.frames.update(slot_index, frame);
-            self.core.seeked(slot_index, target, Instant::now());
+        let now = Instant::now();
+        let effect = self
+            .core
+            .apply(Command::Seek {
+                slot: slot_index,
+                seconds,
+                now,
+            })
+            .map_err(anyhow::Error::msg)?;
+        if let Effect::Seek {
+            id,
+            target,
+            old_position,
+            ..
+        } = effect
+        {
+            match self.captures.seek(slot_index, target, old_position) {
+                Ok(frame) => {
+                    if self.core.seek_result(slot_index, id, true, Instant::now()) {
+                        self.frames.update(slot_index, frame);
+                    }
+                }
+                Err(error) => {
+                    self.core.seek_result(slot_index, id, false, Instant::now());
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -365,41 +390,66 @@ impl QuadPlayer {
     }
 
     fn open_entry_in_slot(&mut self, slot_index: usize, entry: VideoEntry) -> Result<bool> {
-        let Some((fps, frame_count)) = self.captures.prepare(slot_index, &entry.path)? else {
-            return Ok(false);
-        };
-        let (clip_start_frame, clip_end_frame) =
-            self.core
-                .clip_bounds(self.args.clip_seconds, fps, frame_count);
-        if self.args.clip_seconds > 0.0 {
-            self.captures.seek_candidate(slot_index, clip_start_frame)?;
-        }
-
-        // Validate the first frame before replacing a working slot.
-        let Some(first_frame) = self.captures.read_candidate(slot_index)? else {
-            return Ok(false);
-        };
-
-        self.core
-            .opened(
-                slot_index,
-                fps,
-                frame_count,
-                (clip_start_frame, clip_end_frame),
-                Instant::now(),
-                entry.path,
-            )
+        let effect = self
+            .core
+            .apply(Command::Replace {
+                slot: slot_index,
+                path: entry.path.clone(),
+                now: Instant::now(),
+            })
             .map_err(anyhow::Error::msg)?;
-
-        let slot = &mut self.slots[slot_index];
+        let Effect::Open { id, path, .. } = effect else {
+            unreachable!()
+        };
+        let prepared = (|| -> Result<_> {
+            let Some((fps, count)) = self.captures.prepare(slot_index, &path)? else {
+                return Ok(None);
+            };
+            let clip = self.core.clip_bounds(self.args.clip_seconds, fps, count);
+            if self.args.clip_seconds > 0.0 {
+                self.captures.seek_candidate(slot_index, clip.0)?;
+            }
+            Ok(self
+                .captures
+                .read_candidate(slot_index)?
+                .map(|frame| (fps, count, clip, frame)))
+        })();
+        let (fps, count, clip, frame) = match prepared {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                self.core
+                    .open_result(slot_index, id, None, Instant::now())
+                    .map_err(anyhow::Error::msg)?;
+                return Ok(false);
+            }
+            Err(error) => {
+                self.core
+                    .open_result(slot_index, id, None, Instant::now())
+                    .map_err(anyhow::Error::msg)?;
+                return Err(error);
+            }
+        };
+        if !self
+            .core
+            .open_result(
+                slot_index,
+                id,
+                Some((fps, count, clip, path)),
+                Instant::now(),
+            )
+            .map_err(anyhow::Error::msg)?
+        {
+            return Ok(false);
+        }
         self.captures.commit(slot_index);
+        let slot = &mut self.slots[slot_index];
         #[cfg(feature = "downloading")]
         {
             slot.downloaded_file = None;
         }
         slot.error = None;
-        let fade = self.args.transition == TransitionMode::Fade && self.args.transition_ms > 0;
-        if self.frames.replace(slot_index, first_frame, fade) {
+        let fade = self.core.fade() && self.args.transition_ms > 0;
+        if self.frames.replace(slot_index, frame, fade) {
             self.core.start_transition(slot_index, Instant::now());
         }
         Ok(true)
@@ -485,42 +535,46 @@ impl QuadPlayer {
         self.read_next_frame(slot_index, true)
     }
 
-    fn read_next_frame(&mut self, slot_index: usize, allow_refill: bool) -> Result<()> {
+    fn read_next_frame(&mut self, slot_index: usize, _allow_refill: bool) -> Result<()> {
         let now = Instant::now();
-
-        if !self.captures.has_capture(slot_index) {
-            return if allow_refill {
-                self.refill_slot(slot_index)
-            } else {
-                Ok(())
-            };
+        match self
+            .core
+            .apply(Command::Tick {
+                slot: slot_index,
+                now,
+            })
+            .map_err(anyhow::Error::msg)?
+        {
+            Effect::None => Ok(()),
+            Effect::Replace { .. } => self.refill_slot(slot_index),
+            Effect::Read { id, .. } => match self.captures.read(slot_index) {
+                Ok(Some(frame)) => {
+                    if self.core.read_result(slot_index, id, true, now) {
+                        self.frames.update(slot_index, frame);
+                    }
+                    Ok(())
+                }
+                Ok(None) => {
+                    self.core.read_result(slot_index, id, false, now);
+                    if let Effect::Replace { .. } = self
+                        .core
+                        .apply(Command::EndOfMedia {
+                            slot: slot_index,
+                            now,
+                        })
+                        .map_err(anyhow::Error::msg)?
+                    {
+                        self.refill_slot(slot_index)?;
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    self.core.read_result(slot_index, id, false, now);
+                    Err(error)
+                }
+            },
+            _ => unreachable!(),
         }
-        if allow_refill {
-            match self.core.frame_action(slot_index, now) {
-                FrameAction::Wait => return Ok(()),
-                FrameAction::Replace => return self.refill_slot(slot_index),
-                FrameAction::Read => {}
-            }
-        }
-
-        let start = Instant::now();
-        let frame = self.captures.read(slot_index)?;
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_millis(10) {
-            println!("WARN: Slot {} capture read took {:?}", slot_index, elapsed);
-        }
-
-        if let Some(frame) = frame {
-            self.frames.update(slot_index, frame);
-            self.core.frame_read(slot_index, now);
-
-            return Ok(());
-        }
-
-        if allow_refill {
-            self.refill_slot(slot_index)?;
-        }
-        Ok(())
     }
 
     fn show_frame(&self) -> Result<()> {
@@ -543,7 +597,11 @@ impl QuadPlayer {
                 show_help: self.show_help,
                 paused: self.core.slot_paused(i).unwrap_or(true),
                 fullscreen: self.fullscreen,
-                transition: self.args.transition,
+                transition: if self.core.fade() {
+                    TransitionMode::Fade
+                } else {
+                    TransitionMode::Cut
+                },
                 transition_ms: self.args.transition_ms,
             })
             .collect();
