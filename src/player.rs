@@ -2,8 +2,6 @@ use crate::capture::CaptureService;
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::controls::{self, Action};
-#[cfg(feature = "downloading")]
-use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, Effect, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
@@ -15,10 +13,6 @@ use std::time::{Duration, Instant};
 
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
 struct SlotState {
-    #[cfg(feature = "downloading")]
-    download_job: Option<(u64, DownloadJob)>,
-    #[cfg(feature = "downloading")]
-    downloaded_file: Option<DownloadedFile>,
     error: Option<String>,
     scene_start_mark: Option<i32>,
 }
@@ -26,31 +20,14 @@ struct SlotState {
 impl SlotState {
     fn new() -> Self {
         Self {
-            #[cfg(feature = "downloading")]
-            download_job: None,
-            #[cfg(feature = "downloading")]
-            downloaded_file: None,
             error: None,
             scene_start_mark: None,
-        }
-    }
-
-    fn is_downloading(&self) -> bool {
-        #[cfg(feature = "downloading")]
-        {
-            self.download_job.is_some()
-        }
-        #[cfg(not(feature = "downloading"))]
-        {
-            false
         }
     }
 
     fn label<'a>(&'a self, identity: Option<&'a Path>) -> &'a str {
         if let Some(error) = &self.error {
             error
-        } else if self.is_downloading() {
-            "DOWNLOADING..."
         } else if let Some(path) = identity {
             path.file_name()
                 .and_then(|f| f.to_str())
@@ -62,7 +39,7 @@ impl SlotState {
 }
 
 enum InputState {
-    UrlInput { text: String },
+    PathInput { text: String },
     TagInput { text: String, was_paused: bool },
 }
 
@@ -177,8 +154,8 @@ impl QuadPlayer {
         if let Some(mut state) = self.input_state.take() {
             if key == '\r' || key == '\n' {
                 match state {
-                    InputState::UrlInput { text } => {
-                        self.load_url_in_slot(self.core.selected(), text)?;
+                    InputState::PathInput { text } => {
+                        self.load_file_into_slot(self.core.selected(), PathBuf::from(text))?;
                     }
                     InputState::TagInput { text, was_paused } => {
                         self.core
@@ -197,7 +174,7 @@ impl QuadPlayer {
                 return Ok(true);
             } else if key == '\u{8}' || key == '\x7f' {
                 match &mut state {
-                    InputState::UrlInput { text } => {
+                    InputState::PathInput { text } => {
                         text.pop();
                     }
                     InputState::TagInput { text, .. } => {
@@ -208,7 +185,7 @@ impl QuadPlayer {
                 return Ok(true);
             } else if key.is_ascii_graphic() || key == ' ' {
                 match &mut state {
-                    InputState::UrlInput { text } => text.push(key),
+                    InputState::PathInput { text } => text.push(key),
                     InputState::TagInput { text, .. } => text.push(key),
                 }
                 self.input_state = Some(state);
@@ -231,7 +208,7 @@ impl QuadPlayer {
                 self.seek_slot(self.core.selected(), f64::from(seconds))?
             }
             Some(Action::Load) => {
-                self.input_state = Some(InputState::UrlInput {
+                self.input_state = Some(InputState::PathInput {
                     text: String::new(),
                 })
             }
@@ -293,30 +270,7 @@ impl QuadPlayer {
         Ok(true)
     }
 
-    fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
-        if url.starts_with("http://") || url.starts_with("https://") {
-            #[cfg(feature = "downloading")]
-            {
-                let id = self.core.new_request(slot_index).expect("valid slot");
-                let job = downloader::start_download(url);
-                self.slots[slot_index].download_job = Some((id, job));
-                self.slots[slot_index].error = None;
-            }
-            #[cfg(not(feature = "downloading"))]
-            anyhow::bail!("URL downloads are disabled in this build");
-        } else {
-            // Treat as local file
-            self.load_file_into_slot(slot_index, PathBuf::from(url))?;
-        }
-        Ok(())
-    }
-
     fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
-        self.core.new_request(slot_index);
-        #[cfg(feature = "downloading")]
-        {
-            self.slots[slot_index].download_job = None;
-        }
         let entry = VideoEntry::new(path);
         if self.open_entry_in_slot(slot_index, entry)? {
             Ok(())
@@ -453,10 +407,6 @@ impl QuadPlayer {
         }
         self.captures.commit(slot_index);
         let slot = &mut self.slots[slot_index];
-        #[cfg(feature = "downloading")]
-        {
-            slot.downloaded_file = None;
-        }
         slot.error = None;
         let fade = self.core.fade() && self.args.transition_ms > 0;
         if self.frames.replace(slot_index, frame, fade) {
@@ -466,16 +416,6 @@ impl QuadPlayer {
     }
 
     fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
-        self.core.new_request(slot_index);
-        #[cfg(feature = "downloading")]
-        {
-            self.slots[slot_index].download_job = None;
-        }
-        self.refill_slot(slot_index)
-    }
-
-    /// Automatic playback replacement must not cancel a pending download.
-    fn refill_slot(&mut self, slot_index: usize) -> Result<()> {
         let attempts = self.core.pool_size().max(1);
 
         for _ in 0..attempts {
@@ -491,51 +431,16 @@ impl QuadPlayer {
     }
 
     fn release_slot(&mut self, slot_index: usize) -> Result<()> {
-        self.core.new_request(slot_index);
         let slot = &mut self.slots[slot_index];
         self.captures.release(slot_index);
         self.frames.clear(slot_index);
         self.core.clear(slot_index);
-        #[cfg(feature = "downloading")]
-        {
-            slot.download_job = None;
-            slot.downloaded_file = None;
-        }
         slot.error = None;
         slot.scene_start_mark = None;
         Ok(())
     }
 
     fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
-        #[cfg(feature = "downloading")]
-        if let Some((id, job)) = &self.slots[slot_index].download_job {
-            let id = *id;
-            match job.poll() {
-                Ok(Some(file)) => {
-                    #[cfg(feature = "downloading")]
-                    {
-                        self.slots[slot_index].download_job = None;
-                    }
-                    if !self.core.request_is_current(slot_index, id) {
-                        return Ok(());
-                    }
-                    let entry = VideoEntry::new(file.path().to_owned());
-                    if !self.open_entry_in_slot(slot_index, entry)? {
-                        anyhow::bail!("Could not open downloaded file");
-                    }
-                    self.slots[slot_index].downloaded_file = Some(file);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    #[cfg(feature = "downloading")]
-                    {
-                        self.slots[slot_index].download_job = None;
-                    }
-                    return Err(error);
-                }
-            }
-        }
-
         if !self.captures.has_capture(slot_index) && self.slots[slot_index].error.is_some() {
             return Ok(());
         }
@@ -556,7 +461,7 @@ impl QuadPlayer {
             .map_err(anyhow::Error::msg)?
         {
             Effect::None => Ok(()),
-            Effect::Replace { .. } => self.refill_slot(slot_index),
+            Effect::Replace { .. } => self.fill_slot(slot_index),
             Effect::Read { id, .. } => match self.captures.read(slot_index) {
                 Ok(Some(frame)) => {
                     if self.core.read_result(slot_index, id, true, now) {
@@ -574,7 +479,7 @@ impl QuadPlayer {
                         })
                         .map_err(anyhow::Error::msg)?
                     {
-                        self.refill_slot(slot_index)?;
+                        self.fill_slot(slot_index)?;
                     }
                     Ok(())
                 }
@@ -616,7 +521,7 @@ impl QuadPlayer {
             })
             .collect();
         let prompt = self.input_state.as_ref().map(|input| match input {
-            InputState::UrlInput { text } => ("Path or URL", text.as_str()),
+            InputState::PathInput { text } => ("Local path", text.as_str()),
             InputState::TagInput { text, .. } => ("Scene tags", text.as_str()),
         });
         self.window.as_ref().expect("window open").show_mosaic(
@@ -667,7 +572,11 @@ mod tests {
         writer.release()?;
         let args = Args::parse_from(["qplay"]);
         let mut player = QuadPlayer::new(args, vec![], 320, 240, Keybindings::default())?;
-        player.load_file_into_slot(0, path.clone())?;
+        player.handle_key('l')?;
+        for key in path.to_str().unwrap().chars() {
+            player.handle_key(key)?;
+        }
+        player.handle_key('\n')?;
         assert_eq!(player.core.slot(0).unwrap().position, 0);
         player.core.apply(Command::TogglePause).unwrap();
         player.seek_slot(0, 0.2)?;
@@ -705,45 +614,6 @@ mod tests {
         assert!(player.load_file_into_slot(0, broken).is_err());
         assert_eq!(player.core.identity(0), Some(path.as_path()));
         assert_eq!(player.core.slot(0).unwrap().position, 0);
-        #[cfg(all(feature = "downloading", unix))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let program = dir.path().join("fake-downloader");
-            std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n")?;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
-            player.core = PlaybackCore::new(vec![VideoEntry::new(path.clone())], false, None);
-            player.load_file_into_slot(0, path.clone())?;
-            let id = player.core.new_request(0).unwrap();
-            player.slots[0].download_job = Some((
-                id,
-                crate::downloader::start_with("https://example.invalid".into(), program),
-            ));
-            player.refill_slot(0)?;
-            assert!(player.slots[0].download_job.is_some());
-            player.fill_slot(0)?;
-            assert!(player.slots[0].download_job.is_none());
-
-            let completed = dir.path().join("completed-downloader");
-            std::fs::write(
-                &completed,
-                format!("#!/bin/sh\ncp '{}' \"$4\"\n", path.display()),
-            )?;
-            std::fs::set_permissions(&completed, std::fs::Permissions::from_mode(0o700))?;
-            let stale_id = player.core.new_request(0).unwrap();
-            player.slots[0].download_job = Some((
-                stale_id,
-                crate::downloader::start_with("https://example.invalid".into(), completed),
-            ));
-            player.core.new_request(0);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while player.slots[0].download_job.is_some() && Instant::now() < deadline {
-                player.advance_slot(0)?;
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(player.slots[0].download_job.is_none());
-            assert_eq!(player.core.identity(0), Some(path.as_path()));
-            assert!(player.slots[0].downloaded_file.is_none());
-        }
 
         Ok(())
     }

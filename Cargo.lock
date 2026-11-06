@@ -395,7 +395,6 @@ dependencies = [
  "anyhow",
  "clap",
  "directories",
- "libc",
  "opencv",
  "rand",
  "serde",

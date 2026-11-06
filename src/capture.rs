@@ -37,6 +37,9 @@ pub struct Capture {
 }
 impl Capture {
     pub fn open(path: &Path) -> Result<Option<Self>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
         let Some(path) = path.to_str() else {
             return Ok(None);
         };
@@ -156,6 +159,15 @@ impl CaptureService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_sources_are_not_opened() {
+        assert!(
+            super::Capture::open(std::path::Path::new("https://example.invalid/video.mp4"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
     use super::*;
     struct Fake {
         position: i32,
