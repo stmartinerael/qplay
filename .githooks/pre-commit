@@ -11,7 +11,7 @@ if [ "${#staged_rust_files[@]}" -eq 0 ]; then
 fi
 
 echo "Running rustfmt on staged Rust files..."
-rustfmt "${staged_rust_files[@]}"
+rustfmt --edition 2024 "${staged_rust_files[@]}"
 git add -- "${staged_rust_files[@]}"
 
 echo "Running cargo clippy..."
