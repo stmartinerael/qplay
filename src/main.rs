@@ -42,7 +42,7 @@ fn main() -> Result<()> {
         } else {
             Path::new(&args.inputs[0])
         };
-        discover_videos(dir, args.recursive)
+        discover_videos(dir, args.recursive)?
     } else {
         explicit_mode = true;
         args.inputs

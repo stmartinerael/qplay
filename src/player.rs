@@ -333,6 +333,7 @@ impl QuadPlayer {
     }
 
     pub fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
+        self.slots[slot_index].download_job = None;
         let entry = VideoEntry::new(path);
         let previous_frame = self.slots[slot_index].frame.clone();
         if self.open_entry_in_slot(slot_index, entry, previous_frame)? {
@@ -376,7 +377,7 @@ impl QuadPlayer {
                 .read()?
                 .ok_or_else(|| anyhow::anyhow!("Could not read frame after seek"))?;
             slot.frame = Some(frame);
-            slot.frame_index = target.saturating_add(1);
+            slot.frame_index = target;
             slot.next_frame_at = Some(Instant::now());
         }
         Ok(())
@@ -446,7 +447,7 @@ impl QuadPlayer {
         slot.error = None;
         slot.fps = fps;
         slot.frame_count = frame_count;
-        slot.frame_index = clip_start_frame.saturating_add(1);
+        slot.frame_index = clip_start_frame;
         slot.clip_start_frame = clip_start_frame;
         slot.clip_end_frame = clip_end_frame;
         slot.frame = Some(first_frame);
@@ -555,6 +556,14 @@ impl QuadPlayer {
             return Ok(());
         }
 
+        if allow_refill
+            && self.slots[slot_index]
+                .clip_end_frame
+                .is_some_and(|end| self.slots[slot_index].frame_index.saturating_add(1) >= end)
+        {
+            return self.fill_slot(slot_index);
+        }
+
         let start = Instant::now();
         let frame = self.slots[slot_index].capture.as_mut().unwrap().read()?;
         let elapsed = start.elapsed();
@@ -572,11 +581,6 @@ impl QuadPlayer {
                 slot.fps,
             ));
 
-            if let Some(end) = slot.clip_end_frame
-                && slot.frame_index >= end
-            {
-                return self.fill_slot(slot_index);
-            }
             return Ok(());
         }
 

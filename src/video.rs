@@ -32,7 +32,7 @@ impl VideoEntry {
 ///
 /// Filters out partial downloads (e.g., `.part` files) and limits by extension.
 /// If `recursive` is true, subdirectories are also searched.
-pub fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
+pub fn discover_videos(directory: &Path, recursive: bool) -> anyhow::Result<Vec<VideoEntry>> {
     let mut entries = Vec::new();
     let walker = if recursive {
         WalkDir::new(directory)
@@ -40,7 +40,8 @@ pub fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
         WalkDir::new(directory).max_depth(1)
     };
 
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+    for entry in walker {
+        let entry = entry?;
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
             if let Some(ext) = path.extension().and_then(|s| s.to_str())
@@ -56,7 +57,7 @@ pub fn discover_videos(directory: &Path, recursive: bool) -> Vec<VideoEntry> {
         }
     }
     entries.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
-    entries
+    Ok(entries)
 }
 
 /// Manages a collection of discovered videos, handling shuffling and selection
@@ -152,14 +153,14 @@ mod tests {
         File::create(subdir.join("subvideo.mkv"))?;
 
         // Test non-recursive
-        let entries = discover_videos(path, false);
+        let entries = discover_videos(path, false)?;
         assert_eq!(entries.len(), 2);
         let names: Vec<_> = entries.iter().map(|e| e.display_name()).collect();
         assert!(names.contains(&"video1.mp4".to_string()));
         assert!(names.contains(&"video2.MOV".to_string()));
 
         // Test recursive
-        let entries_rec = discover_videos(path, true);
+        let entries_rec = discover_videos(path, true)?;
         assert_eq!(entries_rec.len(), 3);
 
         Ok(())
