@@ -35,4 +35,4 @@ Customizable keys are stored in the platform configuration directory under `qpla
 
 ## Development
 
-Run `cargo fmt --check`, `cargo test`, and `cargo clippy`. The intended boundaries and their contracts are described in [docs/module-contracts.md](docs/module-contracts.md); the refactor toward these boundaries is ongoing. Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.
+Run `cargo fmt --check`, `cargo test`, and `cargo clippy`. The implemented boundaries and remaining work are described in [docs/module-contracts.md](docs/module-contracts.md). Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.

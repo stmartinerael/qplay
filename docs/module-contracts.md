@@ -1,14 +1,12 @@
-# Intended module contracts
+# Module boundaries
 
-Dependencies point downward: application shell -> playback policy -> selection; shell -> capture, rendering, keybindings, scene persistence and downloader. Scene editing and downloading depend on playback operations; local playback requires neither. OpenCV is confined to capture, rendering and the application shell. CLI parsing stays outside playback policy.
+- `playback` owns selected and paused slots, displayed-frame positions, clip bounds, frame scheduling, and transition timing. It accepts explicit times and exposes snapshots and frame actions without depending on OpenCV or CLI types. The coordinator commits an open or seek only after decoding succeeds. Slot paths and selection from the video pool remain in the coordinator.
+- `video` discovers files and reports traversal errors; `VideoPool` handles ordering, shuffle and exclusion. An empty selection is represented by `None`.
+- `capture` owns OpenCV video handles and exposes metadata, reads and seeks. Opening a replacement validates its first frame before replacing a working slot. After a failed seek the coordinator attempts to restore the decoder's next-frame position; backend failure can prevent that restoration.
+- `ui` owns the OpenCV window lifecycle, mosaic composition, and frame rendering. The coordinator supplies rendering information and receives keys.
+- `controls` maps configured keys to application actions. Text entry remains in the coordinator. Configuration errors are reported and defaults are used.
+- `scenes` (feature `scene-editing`) uses the existing JSON sidecar format, validates bounds, and writes via a temporary file and rename. Failed reads or writes do not replace existing data.
+- `downloader` (feature `downloading`) owns the child process, worker and temporary directory. Dropping a job cancels it, waits for the worker to kill and reap the child, and cleans up its temporary files. Each slot owns at most one pending job; replacing it drops the old job before accepting another.
+- `player` coordinates these components and presents operation failures in the terminal and affected tile. Its capture/frame ownership and some replacement and transition policy remain in the coordinator; the intended command/effect separation is not yet complete.
 
-- Playback policy owns slot selection, pause, seek and timing decisions and transition state. It accepts commands and time values, exposes snapshots and effects, and rejects invalid slot indices or metadata without changing state. It has no CLI, OpenCV, scene or downloader dependency.
-- Discovery and selection own file discovery, ordering, shuffle and exclusion. Selection returns an optional entry; an empty pool is normal. Discovery errors must be reported rather than masquerading as an empty directory.
-- Capture owns OpenCV video handles and translates metadata, frame reads and seeks into results. Invalid metadata must not produce invalid ranges; failed opens must leave the previous slot intact.
-- Rendering and window management own OpenCV frames, layout and presentation. Dimensions are validated before allocation. Rendering reports errors to the shell.
-- Keybindings translate keys to application commands; editing input is a shell concern. Configuration loading reports malformed or inaccessible files.
-- Scene persistence owns the existing JSON sidecar format and validates bounds. Failed reads or writes preserve existing data; unknown frame counts do not impose a false upper bound.
-- Downloading owns subprocesses, temporary files and completion. It reports success, failure or cancellation; a stale completion must not replace a newer slot. Temporary artifacts are cleaned up predictably.
-- The shell coordinates these components, presents failures and cleans up resources on exit. Playback continues when an optional operation fails.
-
-The useful local playback subset consists of discovery, playback policy, capture, rendering, keybindings and the shell; no download or scene-editing implementation is needed for its policies or tests.
+Both optional features are enabled by default. Local playback builds without either using `--no-default-features`.
