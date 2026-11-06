@@ -36,8 +36,14 @@ impl Window {
         }
         Ok(())
     }
-    pub fn show(&self, frame: &Mat) -> Result<()> {
-        highgui::imshow(&self.name, frame)?;
+    pub fn show_mosaic(
+        &self,
+        slots: &[SlotRenderInfo<'_>],
+        options: &[RenderOptions],
+        layout: MosaicOptions<'_>,
+    ) -> Result<()> {
+        let frame = compose_mosaic(slots, options, layout)?;
+        highgui::imshow(&self.name, &frame)?;
         Ok(())
     }
     pub fn key(&self, delay_ms: i32) -> Result<i32> {
@@ -47,6 +53,51 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         let _ = highgui::destroy_window(&self.name);
+    }
+}
+
+/// Retains the current and previous images used by the mosaic renderer.
+#[derive(Default)]
+pub struct Frames {
+    current: [Option<Mat>; 4],
+    previous: [Option<Mat>; 4],
+}
+impl Frames {
+    pub fn replace(&mut self, slot: usize, frame: Mat, fade: bool) -> bool {
+        self.previous[slot] = if fade {
+            self.current[slot].take()
+        } else {
+            None
+        };
+        self.current[slot] = Some(frame);
+        self.previous[slot].is_some()
+    }
+    pub fn update(&mut self, slot: usize, frame: Mat) {
+        self.current[slot] = Some(frame);
+    }
+    pub fn clear(&mut self, slot: usize) {
+        self.current[slot] = None;
+        self.previous[slot] = None;
+    }
+    pub fn info<'a>(
+        &'a self,
+        slot: usize,
+        label: &'a str,
+        position: i32,
+        started: Option<Instant>,
+    ) -> SlotRenderInfo<'a> {
+        SlotRenderInfo {
+            slot_index: slot,
+            label,
+            frame_index: position,
+            frame: self.current[slot].as_ref(),
+            transition_from: self.previous[slot].as_ref(),
+            transition_started_at: started,
+        }
+    }
+    #[cfg(test)]
+    pub fn current(&self, slot: usize) -> Option<&Mat> {
+        self.current[slot].as_ref()
     }
 }
 

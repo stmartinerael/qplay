@@ -7,18 +7,14 @@ use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, FrameAction, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
-use crate::ui::{self, MosaicOptions, RenderOptions, SlotRenderInfo};
+use crate::ui::{self, MosaicOptions, RenderOptions};
 use crate::video::VideoEntry;
 use anyhow::Result;
-use opencv::core::Mat;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
 struct SlotState {
-    slot_index: usize,
-    frame: Option<Mat>,
-    transition_from: Option<Mat>,
     #[cfg(feature = "downloading")]
     download_job: Option<(u64, DownloadJob)>,
     #[cfg(feature = "downloading")]
@@ -28,11 +24,8 @@ struct SlotState {
 }
 
 impl SlotState {
-    fn new(slot_index: usize) -> Self {
+    fn new() -> Self {
         Self {
-            slot_index,
-            frame: None,
-            transition_from: None,
             #[cfg(feature = "downloading")]
             download_job: None,
             #[cfg(feature = "downloading")]
@@ -53,29 +46,17 @@ impl SlotState {
         }
     }
 
-    fn to_render_info<'a>(
-        &'a self,
-        frame_index: i32,
-        transition_started_at: Option<Instant>,
-        identity: Option<&'a Path>,
-    ) -> SlotRenderInfo<'a> {
-        SlotRenderInfo {
-            slot_index: self.slot_index,
-            label: if let Some(error) = &self.error {
-                error
-            } else if self.is_downloading() {
-                "DOWNLOADING..."
-            } else if let Some(path) = identity {
-                path.file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("[unknown]")
-            } else {
-                "[empty]"
-            },
-            frame_index,
-            frame: self.frame.as_ref(),
-            transition_from: self.transition_from.as_ref(),
-            transition_started_at,
+    fn label<'a>(&'a self, identity: Option<&'a Path>) -> &'a str {
+        if let Some(error) = &self.error {
+            error
+        } else if self.is_downloading() {
+            "DOWNLOADING..."
+        } else if let Some(path) = identity {
+            path.file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("[unknown]")
+        } else {
+            "[empty]"
         }
     }
 }
@@ -94,6 +75,7 @@ pub struct QuadPlayer {
     slots: Vec<SlotState>,
     core: PlaybackCore,
     captures: CaptureService,
+    frames: ui::Frames,
     show_help: bool,
     fullscreen: bool,
     config: Keybindings,
@@ -113,8 +95,8 @@ impl QuadPlayer {
         let core = PlaybackCore::new(entries, !args.no_shuffle, args.seed);
 
         let mut slots = Vec::with_capacity(4);
-        for i in 0..4 {
-            slots.push(SlotState::new(i));
+        for _ in 0..4 {
+            slots.push(SlotState::new());
         }
 
         Ok(Self {
@@ -124,6 +106,7 @@ impl QuadPlayer {
             slots,
             core,
             captures: CaptureService::default(),
+            frames: ui::Frames::default(),
             show_help: true,
             fullscreen,
             config,
@@ -156,8 +139,7 @@ impl QuadPlayer {
                 }
             }
 
-            let mosaic = self.compose_frame()?;
-            self.window.as_ref().unwrap().show(&mosaic)?;
+            self.show_frame()?;
 
             let elapsed = start.elapsed();
             if elapsed > Duration::from_millis(20) {
@@ -322,8 +304,7 @@ impl QuadPlayer {
             self.slots[slot_index].download_job = None;
         }
         let entry = VideoEntry::new(path);
-        let previous_frame = self.slots[slot_index].frame.clone();
-        if self.open_entry_in_slot(slot_index, entry, previous_frame)? {
+        if self.open_entry_in_slot(slot_index, entry)? {
             Ok(())
         } else {
             anyhow::bail!("Could not open file in slot {}", slot_index)
@@ -367,11 +348,10 @@ impl QuadPlayer {
         let Some(target) = self.core.seek_target(slot_index, seconds) else {
             return Ok(());
         };
-        let slot = &mut self.slots[slot_index];
         if self.captures.has_capture(slot_index) {
             let old_position = self.core.slot(slot_index).unwrap().position;
             let frame = self.captures.seek(slot_index, target, old_position)?;
-            slot.frame = Some(frame);
+            self.frames.update(slot_index, frame);
             self.core.seeked(slot_index, target, Instant::now());
         }
         Ok(())
@@ -384,12 +364,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    fn open_entry_in_slot(
-        &mut self,
-        slot_index: usize,
-        entry: VideoEntry,
-        previous_frame: Option<Mat>,
-    ) -> Result<bool> {
+    fn open_entry_in_slot(&mut self, slot_index: usize, entry: VideoEntry) -> Result<bool> {
         let Some((fps, frame_count)) = self.captures.prepare(slot_index, &entry.path)? else {
             return Ok(false);
         };
@@ -423,22 +398,11 @@ impl QuadPlayer {
             slot.downloaded_file = None;
         }
         slot.error = None;
-        slot.frame = Some(first_frame);
-        slot.transition_from = None;
-
-        if self.slots[slot_index].frame.is_some() {
-            if self.args.transition == TransitionMode::Fade
-                && self.args.transition_ms > 0
-                && previous_frame.is_some()
-            {
-                let slot = &mut self.slots[slot_index];
-                slot.transition_from = previous_frame;
-                self.core.start_transition(slot_index, Instant::now());
-            }
-            return Ok(true);
+        let fade = self.args.transition == TransitionMode::Fade && self.args.transition_ms > 0;
+        if self.frames.replace(slot_index, first_frame, fade) {
+            self.core.start_transition(slot_index, Instant::now());
         }
-
-        Ok(false)
+        Ok(true)
     }
 
     fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
@@ -452,14 +416,13 @@ impl QuadPlayer {
 
     /// Automatic playback replacement must not cancel a pending download.
     fn refill_slot(&mut self, slot_index: usize) -> Result<()> {
-        let previous_frame = self.slots[slot_index].frame.clone();
         let attempts = self.core.pool_size().max(1);
 
         for _ in 0..attempts {
             let Some(entry) = self.core.next_entry(slot_index) else {
                 anyhow::bail!("No video files available");
             };
-            if self.open_entry_in_slot(slot_index, entry, previous_frame.clone())? {
+            if self.open_entry_in_slot(slot_index, entry)? {
                 return Ok(());
             }
         }
@@ -471,8 +434,7 @@ impl QuadPlayer {
         self.core.new_request(slot_index);
         let slot = &mut self.slots[slot_index];
         self.captures.release(slot_index);
-        slot.frame = None;
-        slot.transition_from = None;
+        self.frames.clear(slot_index);
         self.core.clear(slot_index);
         #[cfg(feature = "downloading")]
         {
@@ -498,8 +460,7 @@ impl QuadPlayer {
                         return Ok(());
                     }
                     let entry = VideoEntry::new(file.path().to_owned());
-                    let previous = self.slots[slot_index].frame.clone();
-                    if !self.open_entry_in_slot(slot_index, entry, previous)? {
+                    if !self.open_entry_in_slot(slot_index, entry)? {
                         anyhow::bail!("Could not open downloaded file");
                     }
                     self.slots[slot_index].downloaded_file = Some(file);
@@ -550,8 +511,7 @@ impl QuadPlayer {
         }
 
         if let Some(frame) = frame {
-            let slot = &mut self.slots[slot_index];
-            slot.frame = Some(frame);
+            self.frames.update(slot_index, frame);
             self.core.frame_read(slot_index, now);
 
             return Ok(());
@@ -563,17 +523,18 @@ impl QuadPlayer {
         Ok(())
     }
 
-    fn compose_frame(&self) -> Result<Mat> {
+    fn show_frame(&self) -> Result<()> {
         let infos: Vec<_> = self
             .slots
             .iter()
             .enumerate()
             .map(|(i, slot)| {
                 let timeline = self.core.slot(i);
-                slot.to_render_info(
+                self.frames.info(
+                    i,
+                    slot.label(self.core.identity(i)),
                     timeline.map_or(0, |s| s.position),
                     timeline.and_then(|s| s.transition_started_at),
-                    self.core.identity(i),
                 )
             })
             .collect();
@@ -590,7 +551,7 @@ impl QuadPlayer {
             InputState::UrlInput { text } => ("Path or URL", text.as_str()),
             InputState::TagInput { text, .. } => ("Scene tags", text.as_str()),
         });
-        ui::compose_mosaic(
+        self.window.as_ref().expect("window open").show_mosaic(
             &infos,
             &options,
             MosaicOptions {
@@ -613,7 +574,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use opencv::{
-        core::{self, Scalar, Size},
+        core::{self, Mat, Scalar, Size},
         prelude::*,
         videoio,
     };
@@ -643,9 +604,9 @@ mod tests {
         player.core.apply(Command::TogglePause).unwrap();
         player.seek_slot(0, 0.2)?;
         assert_eq!(player.core.slot(0).unwrap().position, 2);
-        let before = player.slots[0]
-            .frame
-            .as_ref()
+        let before = player
+            .frames
+            .current(0)
             .unwrap()
             .at_2d::<core::Vec3b>(0, 0)?[0];
         assert!(
@@ -656,9 +617,9 @@ mod tests {
         assert_eq!(player.core.slot(0).unwrap().position, 2);
         assert_eq!(player.core.identity(0), Some(path.as_path()));
         assert_eq!(
-            player.slots[0]
-                .frame
-                .as_ref()
+            player
+                .frames
+                .current(0)
                 .unwrap()
                 .at_2d::<core::Vec3b>(0, 0)?[0],
             before
