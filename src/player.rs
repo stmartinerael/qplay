@@ -1,4 +1,4 @@
-use crate::capture::Capture;
+use crate::capture::CaptureService;
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
 use crate::controls::{self, Action};
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
 struct SlotState {
     slot_index: usize,
-    capture: Option<Capture>,
     frame: Option<Mat>,
     transition_from: Option<Mat>,
     #[cfg(feature = "downloading")]
@@ -32,7 +31,6 @@ impl SlotState {
     fn new(slot_index: usize) -> Self {
         Self {
             slot_index,
-            capture: None,
             frame: None,
             transition_from: None,
             #[cfg(feature = "downloading")]
@@ -95,6 +93,7 @@ pub struct QuadPlayer {
     height: i32,
     slots: Vec<SlotState>,
     core: PlaybackCore,
+    captures: CaptureService,
     show_help: bool,
     fullscreen: bool,
     config: Keybindings,
@@ -124,6 +123,7 @@ impl QuadPlayer {
             height,
             slots,
             core,
+            captures: CaptureService::default(),
             show_help: true,
             fullscreen,
             config,
@@ -368,9 +368,9 @@ impl QuadPlayer {
             return Ok(());
         };
         let slot = &mut self.slots[slot_index];
-        if let Some(capture) = &mut slot.capture {
+        if self.captures.has_capture(slot_index) {
             let old_position = self.core.slot(slot_index).unwrap().position;
-            let frame = capture.seek_displayed_frame(target, old_position)?;
+            let frame = self.captures.seek(slot_index, target, old_position)?;
             slot.frame = Some(frame);
             self.core.seeked(slot_index, target, Instant::now());
         }
@@ -390,20 +390,18 @@ impl QuadPlayer {
         entry: VideoEntry,
         previous_frame: Option<Mat>,
     ) -> Result<bool> {
-        let Some(mut capture) = Capture::open(&entry.path)? else {
+        let Some((fps, frame_count)) = self.captures.prepare(slot_index, &entry.path)? else {
             return Ok(false);
         };
-        let fps = capture.fps();
-        let frame_count = capture.frame_count();
         let (clip_start_frame, clip_end_frame) =
             self.core
                 .clip_bounds(self.args.clip_seconds, fps, frame_count);
         if self.args.clip_seconds > 0.0 {
-            capture.seek(clip_start_frame)?;
+            self.captures.seek_candidate(slot_index, clip_start_frame)?;
         }
 
         // Validate the first frame before replacing a working slot.
-        let Some(first_frame) = capture.read()? else {
+        let Some(first_frame) = self.captures.read_candidate(slot_index)? else {
             return Ok(false);
         };
 
@@ -419,7 +417,7 @@ impl QuadPlayer {
             .map_err(anyhow::Error::msg)?;
 
         let slot = &mut self.slots[slot_index];
-        slot.capture = Some(capture);
+        self.captures.commit(slot_index);
         #[cfg(feature = "downloading")]
         {
             slot.downloaded_file = None;
@@ -472,7 +470,7 @@ impl QuadPlayer {
     fn release_slot(&mut self, slot_index: usize) -> Result<()> {
         self.core.new_request(slot_index);
         let slot = &mut self.slots[slot_index];
-        slot.capture = None;
+        self.captures.release(slot_index);
         slot.frame = None;
         slot.transition_from = None;
         self.core.clear(slot_index);
@@ -517,7 +515,7 @@ impl QuadPlayer {
             }
         }
 
-        if self.slots[slot_index].capture.is_none() && self.slots[slot_index].error.is_some() {
+        if !self.captures.has_capture(slot_index) && self.slots[slot_index].error.is_some() {
             return Ok(());
         }
         if self.core.slot_paused(slot_index).unwrap_or(true) {
@@ -529,7 +527,7 @@ impl QuadPlayer {
     fn read_next_frame(&mut self, slot_index: usize, allow_refill: bool) -> Result<()> {
         let now = Instant::now();
 
-        if self.slots[slot_index].capture.is_none() {
+        if !self.captures.has_capture(slot_index) {
             return if allow_refill {
                 self.refill_slot(slot_index)
             } else {
@@ -545,7 +543,7 @@ impl QuadPlayer {
         }
 
         let start = Instant::now();
-        let frame = self.slots[slot_index].capture.as_mut().unwrap().read()?;
+        let frame = self.captures.read(slot_index)?;
         let elapsed = start.elapsed();
         if elapsed > Duration::from_millis(10) {
             println!("WARN: Slot {} capture read took {:?}", slot_index, elapsed);

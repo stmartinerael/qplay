@@ -103,6 +103,53 @@ impl SeekBackend for Capture {
     }
 }
 
+/// Owns current and candidate decoders for all slots. A candidate is committed
+/// only after its first frame has been decoded and playback metadata validated.
+#[derive(Default)]
+pub struct CaptureService {
+    current: [Option<Capture>; 4],
+    candidate: [Option<Capture>; 4],
+}
+impl CaptureService {
+    pub fn prepare(&mut self, slot: usize, path: &Path) -> Result<Option<(f64, i32)>> {
+        self.candidate[slot] = Capture::open(path)?;
+        Ok(self.candidate[slot]
+            .as_ref()
+            .map(|c| (c.fps(), c.frame_count())))
+    }
+    pub fn seek_candidate(&mut self, slot: usize, frame: i32) -> Result<()> {
+        self.candidate[slot]
+            .as_mut()
+            .expect("candidate prepared")
+            .seek(frame)
+    }
+    pub fn read_candidate(&mut self, slot: usize) -> Result<Option<Mat>> {
+        self.candidate[slot]
+            .as_mut()
+            .expect("candidate prepared")
+            .read()
+    }
+    pub fn commit(&mut self, slot: usize) {
+        self.current[slot] = self.candidate[slot].take();
+    }
+    pub fn release(&mut self, slot: usize) {
+        self.candidate[slot] = None;
+        self.current[slot] = None;
+    }
+    pub fn has_capture(&self, slot: usize) -> bool {
+        self.current[slot].is_some()
+    }
+    pub fn seek(&mut self, slot: usize, target: i32, position: i32) -> Result<Mat> {
+        self.current[slot]
+            .as_mut()
+            .expect("capture exists")
+            .seek_displayed_frame(target, position)
+    }
+    pub fn read(&mut self, slot: usize) -> Result<Option<Mat>> {
+        self.current[slot].as_mut().expect("capture exists").read()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
