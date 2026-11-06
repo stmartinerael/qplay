@@ -3,7 +3,7 @@ use crate::config::Keybindings;
 use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, PlaybackCore};
 use crate::scenes::{Scene, load_scenes, save_scenes};
-use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, render_slot};
+use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, put_text, render_slot};
 use crate::video::{VideoEntry, VideoPool};
 use anyhow::Result;
 use opencv::{
@@ -93,7 +93,7 @@ impl SlotState {
 
 pub enum InputState {
     UrlInput { text: String },
-    TagInput { text: String },
+    TagInput { text: String, was_paused: bool },
 }
 
 /// The main orchestrator managing the OpenCV window, the four video slots,
@@ -188,7 +188,10 @@ impl QuadPlayer {
                 match self.handle_key(key_char) {
                     Ok(false) => break,
                     Ok(true) => {}
-                    Err(error) => eprintln!("Operation failed: {error:#}"),
+                    Err(error) => {
+                        eprintln!("Operation failed: {error:#}");
+                        self.slots[self.core.selected()].error = Some(format!("ERROR: {error}"));
+                    }
                 }
             }
         }
@@ -215,19 +218,27 @@ impl QuadPlayer {
                     InputState::UrlInput { text } => {
                         self.load_url_in_slot(self.core.selected(), text)?;
                     }
-                    InputState::TagInput { text } => {
+                    InputState::TagInput { text, was_paused } => {
+                        self.core
+                            .apply(Command::SetSelectedPause(was_paused))
+                            .expect("valid command");
                         self.finish_scene(self.core.selected(), text)?;
                     }
                 }
                 return Ok(true);
             } else if key == '\u{1b}' {
+                if let InputState::TagInput { was_paused, .. } = state {
+                    self.core
+                        .apply(Command::SetSelectedPause(was_paused))
+                        .expect("valid command");
+                }
                 return Ok(true);
             } else if key == '\u{8}' || key == '\x7f' {
                 match &mut state {
                     InputState::UrlInput { text } => {
                         text.pop();
                     }
-                    InputState::TagInput { text } => {
+                    InputState::TagInput { text, .. } => {
                         text.pop();
                     }
                 }
@@ -236,7 +247,7 @@ impl QuadPlayer {
             } else if key.is_ascii_graphic() || key == ' ' {
                 match &mut state {
                     InputState::UrlInput { text } => text.push(key),
-                    InputState::TagInput { text } => text.push(key),
+                    InputState::TagInput { text, .. } => text.push(key),
                 }
                 self.input_state = Some(state);
                 return Ok(true);
@@ -287,11 +298,16 @@ impl QuadPlayer {
             return Ok(true);
         }
         if key == self.config.mark_scene_stop {
+            let was_paused = self
+                .core
+                .individually_paused(self.core.selected())
+                .unwrap_or(false);
             self.core
                 .apply(Command::SetSelectedPause(true))
                 .expect("valid command");
             self.input_state = Some(InputState::TagInput {
                 text: String::new(),
+                was_paused,
             });
             return Ok(true);
         }
@@ -359,9 +375,6 @@ impl QuadPlayer {
     }
 
     pub fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
-        self.core
-            .apply(Command::SetSelectedPause(false))
-            .expect("valid command");
         let slot = &mut self.slots[slot_index];
         let start_frame = slot.scene_start_mark.unwrap_or(0);
         let end_frame = slot.frame_index;
@@ -669,6 +682,29 @@ impl QuadPlayer {
             imgproc::LINE_8,
             0,
         )?;
+
+        if let Some(input) = &self.input_state {
+            let (prompt, text) = match input {
+                InputState::UrlInput { text } => ("Path or URL", text),
+                InputState::TagInput { text, .. } => ("Scene tags", text),
+            };
+            imgproc::rectangle(
+                &mut canvas,
+                Rect::new(0, self.height - 44, self.width, 44),
+                Dracula::OVERLAY,
+                -1,
+                imgproc::LINE_8,
+                0,
+            )?;
+            put_text(
+                &mut canvas,
+                &format!("{prompt}: {text}"),
+                Point::new(12, self.height - 16),
+                0.55,
+                Dracula::TEXT,
+                1,
+            )?;
+        }
 
         let elapsed = start.elapsed();
         if elapsed > Duration::from_millis(16) {

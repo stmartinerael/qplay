@@ -37,6 +37,9 @@ impl PlaybackCore {
     pub fn paused(&self) -> bool {
         self.paused
     }
+    pub fn individually_paused(&self, index: usize) -> Option<bool> {
+        self.slots_paused.get(index).copied()
+    }
     pub fn slot_paused(&self, index: usize) -> Option<bool> {
         self.slots_paused
             .get(index)

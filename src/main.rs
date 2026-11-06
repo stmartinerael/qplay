@@ -23,7 +23,13 @@ use video::{VideoEntry, discover_videos};
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config = config::load_keybindings().unwrap_or_default();
+    let config = match config::load_keybindings() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Could not load keybindings: {error:#}; using defaults");
+            config::Keybindings::default()
+        }
+    };
 
     let mut explicit_mode = false;
     let entries = if args.inputs.is_empty()
