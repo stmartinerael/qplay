@@ -372,7 +372,12 @@ impl QuadPlayer {
             let target =
                 crate::playback::seek_target(slot.frame_index, seconds, slot.fps, slot.frame_count);
             capture.seek(target)?;
-            slot.frame_index = target;
+            let frame = capture
+                .read()?
+                .ok_or_else(|| anyhow::anyhow!("Could not read frame after seek"))?;
+            slot.frame = Some(frame);
+            slot.frame_index = target.saturating_add(1);
+            slot.next_frame_at = Some(Instant::now());
         }
         Ok(())
     }
@@ -419,12 +424,12 @@ impl QuadPlayer {
         let mut clip_end_frame = None;
 
         if self.args.clip_seconds > 0.0 {
-            let clip_frames = (self.args.clip_seconds * fps).round() as i32;
+            let clip_frames = ((self.args.clip_seconds * fps).round() as i32).max(1);
             if frame_count > clip_frames {
                 let max_start = (frame_count - clip_frames - 1).max(0);
                 clip_start_frame = self.rng.gen_range(0..=max_start);
             }
-            clip_end_frame = Some(clip_start_frame + clip_frames);
+            clip_end_frame = Some(clip_start_frame.saturating_add(clip_frames));
             capture.seek(clip_start_frame)?;
         }
 
@@ -560,7 +565,7 @@ impl QuadPlayer {
         if let Some(frame) = frame {
             let slot = &mut self.slots[slot_index];
             slot.frame = Some(frame);
-            slot.frame_index += 1;
+            slot.frame_index = slot.frame_index.saturating_add(1);
             slot.next_frame_at = Some(crate::playback::next_frame_time(
                 now,
                 slot.next_frame_at,

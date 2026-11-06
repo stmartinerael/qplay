@@ -12,7 +12,7 @@ cargo run -- video1.mp4 video2.mp4 --no-shuffle
 cargo run -- --help
 ```
 
-The default window is 1280×720. `--width` and `--height` must be at least 240 and 160 respectively. Use `--fullscreen`, `--clip-seconds`, `--seed`, `--transition cut|fade`, and `--transition-ms` to adjust playback. `--clip-seconds` must be finite and non-negative. URL downloads require `yt-dlp` on PATH.
+The default window is 1280×720. `--width` and `--height` must be at least 240 and 160 respectively. Use `--fullscreen`, `--clip-seconds`, `--seed`, `--transition cut|fade`, and `--transition-ms` to adjust playback. `--clip-seconds` must be finite and non-negative. URL downloads require `yt-dlp` on PATH. Existing playback continues during a download. Replacing a pending download cancels it; downloaded temporary files are removed when replaced or when qplay closes.
 
 ## Controls
 
@@ -29,7 +29,7 @@ The default window is 1280×720. `--width` and `--height` must be at least 240 a
 | c / r | Replace all slots / reshuffle |
 | t / f / h | Change transition / fullscreen / help |
 
-Customizable keys are stored in the platform configuration directory under `qplay/keybindings.json`. Scene annotations are stored beside the video as `<filename>.scenes.json`. Malformed scene data is reported and is not replaced by an empty scene list. Playback operation errors are printed to the terminal.
+Customizable keys are stored in the platform configuration directory under `qplay/keybindings.json`. Scene annotations are stored beside the video as `<filename>.scenes.json`. Malformed scene data is reported and is not replaced by an empty scene list. Sidecars are written through a temporary file and renamed into place. Playback operation errors appear in the affected tile and in the terminal.
 
 ## Development
 
