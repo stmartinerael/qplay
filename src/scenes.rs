@@ -186,6 +186,21 @@ mod tests {
     }
 
     #[test]
+    fn unwritable_destination_reports_error_without_losing_existing_data() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("video.mp4");
+        let sidecar = get_sidecar_path(&path);
+        // A directory at the destination makes the final rename fail on all platforms.
+        std::fs::create_dir(&sidecar)?;
+        let sentinel = sidecar.join("keep");
+        std::fs::write(&sentinel, "original")?;
+        assert!(save_scenes(&path, &SceneData::default(), 0).is_err());
+        assert_eq!(std::fs::read_to_string(sentinel)?, "original");
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn test_load_scenes_nonexistent() -> Result<()> {
         let path = Path::new("/nonexistent/video.mp4");
         let data = load_scenes(path)?;

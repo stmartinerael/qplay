@@ -263,10 +263,18 @@ impl QuadPlayer {
                     self.core.resume_at(now);
                 }
             }
-            Some(Action::Replace(index)) => self.fill_slot(index)?,
+            Some(Action::Replace(index)) => {
+                if let Err(error) = self.fill_slot(index) {
+                    eprintln!("Slot {}: {error:#}", index + 1);
+                    self.slots[index].error = Some(format!("ERROR: {error}"));
+                }
+            }
             Some(Action::ReplaceAll) => {
                 for index in 0..4 {
-                    self.fill_slot(index)?;
+                    if let Err(error) = self.fill_slot(index) {
+                        eprintln!("Slot {}: {error:#}", index + 1);
+                        self.slots[index].error = Some(format!("ERROR: {error}"));
+                    }
                 }
             }
             Some(Action::Reshuffle) => self.core.reshuffle(),
@@ -532,10 +540,10 @@ impl QuadPlayer {
         if self.core.slot_paused(slot_index).unwrap_or(true) {
             return Ok(());
         }
-        self.read_next_frame(slot_index, true)
+        self.read_next_frame(slot_index)
     }
 
-    fn read_next_frame(&mut self, slot_index: usize, _allow_refill: bool) -> Result<()> {
+    fn read_next_frame(&mut self, slot_index: usize) -> Result<()> {
         let now = Instant::now();
         match self
             .core
@@ -682,6 +690,19 @@ mod tests {
                 .at_2d::<core::Vec3b>(0, 0)?[0],
             before
         );
+        // A local file reaches EOF, then automatically refills without losing its slot.
+        player.core = PlaybackCore::new(vec![VideoEntry::new(path.clone())], false, Some(7));
+        player.load_file_into_slot(0, path.clone())?;
+        player.seek_slot(0, 0.2)?;
+        player.read_next_frame(0)?;
+        assert_eq!(player.core.slot(0).unwrap().position, 0);
+        assert_eq!(player.core.identity(0), Some(path.as_path()));
+        // An existing but undecodable input also leaves the current frame intact.
+        let broken = dir.path().join("broken.avi");
+        std::fs::write(&broken, b"not a video")?;
+        assert!(player.load_file_into_slot(0, broken).is_err());
+        assert_eq!(player.core.identity(0), Some(path.as_path()));
+        assert_eq!(player.core.slot(0).unwrap().position, 0);
         #[cfg(all(feature = "downloading", unix))]
         {
             use std::os::unix::fs::PermissionsExt;
