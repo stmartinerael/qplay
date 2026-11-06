@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     }
 
     let (width, height) = resolve_dimensions(&args)?;
-    let mut player = QuadPlayer::new(args, entries, width, height, config, explicit_mode)?;
+    let mut player = QuadPlayer::new(args, entries, width, height, config)?;
     player.run()?;
     Ok(())
 }

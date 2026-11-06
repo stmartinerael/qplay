@@ -66,7 +66,7 @@ pub struct VideoPool {
     entries: Vec<VideoEntry>,
     shuffle: bool,
     rng: rand::rngs::StdRng,
-    pub(crate) queue: Vec<VideoEntry>,
+    queue: Vec<VideoEntry>,
 }
 
 impl VideoPool {

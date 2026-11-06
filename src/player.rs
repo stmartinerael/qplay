@@ -16,21 +16,21 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Maintains the playback state, timing, and current frame for a single mosaic tile.
-pub struct SlotState {
-    pub slot_index: usize,
-    pub capture: Option<Capture>,
-    pub frame: Option<Mat>,
-    pub transition_from: Option<Mat>,
+struct SlotState {
+    slot_index: usize,
+    capture: Option<Capture>,
+    frame: Option<Mat>,
+    transition_from: Option<Mat>,
     #[cfg(feature = "downloading")]
     download_job: Option<(u64, DownloadJob)>,
     #[cfg(feature = "downloading")]
     downloaded_file: Option<DownloadedFile>,
     error: Option<String>,
-    pub scene_start_mark: Option<i32>,
+    scene_start_mark: Option<i32>,
 }
 
 impl SlotState {
-    pub fn new(slot_index: usize) -> Self {
+    fn new(slot_index: usize) -> Self {
         Self {
             slot_index,
             capture: None,
@@ -56,7 +56,7 @@ impl SlotState {
         }
     }
 
-    pub fn to_render_info<'a>(
+    fn to_render_info<'a>(
         &'a self,
         frame_index: i32,
         transition_started_at: Option<Instant>,
@@ -83,7 +83,7 @@ impl SlotState {
     }
 }
 
-pub enum InputState {
+enum InputState {
     UrlInput { text: String },
     TagInput { text: String, was_paused: bool },
 }
@@ -91,18 +91,17 @@ pub enum InputState {
 /// The main orchestrator managing the OpenCV window, the four video slots,
 /// and the playback loop.
 pub struct QuadPlayer {
-    pub args: Args,
-    pub pool: VideoPool,
-    pub rng: rand::rngs::StdRng,
-    pub width: i32,
-    pub height: i32,
-    pub slots: Vec<SlotState>,
+    args: Args,
+    pool: VideoPool,
+    rng: rand::rngs::StdRng,
+    width: i32,
+    height: i32,
+    slots: Vec<SlotState>,
     core: PlaybackCore,
-    pub show_help: bool,
-    pub fullscreen: bool,
-    pub config: Keybindings,
-    pub input_state: Option<InputState>,
-    pub explicit_mode: bool,
+    show_help: bool,
+    fullscreen: bool,
+    config: Keybindings,
+    input_state: Option<InputState>,
     window: Option<ui::Window>,
 }
 
@@ -113,7 +112,6 @@ impl QuadPlayer {
         width: i32,
         height: i32,
         config: Keybindings,
-        explicit_mode: bool,
     ) -> Result<Self> {
         let fullscreen = args.fullscreen;
         let pool = VideoPool::new(entries, !args.no_shuffle, args.seed);
@@ -140,7 +138,6 @@ impl QuadPlayer {
             fullscreen,
             config,
             input_state: None,
-            explicit_mode,
             window: None,
         })
     }
@@ -195,7 +192,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> Result<()> {
         for i in 0..self.slots.len() {
             let _ = self.release_slot(i);
         }
@@ -203,7 +200,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn handle_key(&mut self, key: char) -> Result<bool> {
+    fn handle_key(&mut self, key: char) -> Result<bool> {
         if let Some(mut state) = self.input_state.take() {
             if key == '\r' || key == '\n' {
                 match state {
@@ -310,7 +307,7 @@ impl QuadPlayer {
         Ok(true)
     }
 
-    pub fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
+    fn load_url_in_slot(&mut self, slot_index: usize, url: String) -> Result<()> {
         if url.starts_with("http://") || url.starts_with("https://") {
             #[cfg(feature = "downloading")]
             {
@@ -328,7 +325,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
+    fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
         self.core.new_request(slot_index);
         #[cfg(feature = "downloading")]
         {
@@ -344,7 +341,7 @@ impl QuadPlayer {
     }
 
     #[cfg(feature = "scene-editing")]
-    pub fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
+    fn finish_scene(&mut self, slot_index: usize, tags_text: String) -> Result<()> {
         let slot = &mut self.slots[slot_index];
         let start_frame = slot.scene_start_mark.unwrap_or(0);
         let Some(timeline) = self.core.slot(slot_index) else {
@@ -376,7 +373,7 @@ impl QuadPlayer {
         anyhow::bail!("Scene editing is disabled in this build")
     }
 
-    pub fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
+    fn seek_slot(&mut self, slot_index: usize, seconds: f64) -> Result<()> {
         let Some(target) = self.core.seek_target(slot_index, seconds) else {
             return Ok(());
         };
@@ -390,14 +387,14 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn apply_window_mode(&self) -> Result<()> {
+    fn apply_window_mode(&self) -> Result<()> {
         if let Some(window) = &self.window {
             window.set_fullscreen(self.fullscreen)?;
         }
         Ok(())
     }
 
-    pub fn current_paths(&self, ignored_slot_index: Option<usize>) -> Vec<PathBuf> {
+    fn current_paths(&self, ignored_slot_index: Option<usize>) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         for i in 0..self.slots.len() {
             if Some(i) == ignored_slot_index {
@@ -475,7 +472,7 @@ impl QuadPlayer {
         Ok(false)
     }
 
-    pub fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
+    fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
         self.core.new_request(slot_index);
         #[cfg(feature = "downloading")]
         {
@@ -502,7 +499,7 @@ impl QuadPlayer {
         anyhow::bail!("Could not open any readable video files.")
     }
 
-    pub fn release_slot(&mut self, slot_index: usize) -> Result<()> {
+    fn release_slot(&mut self, slot_index: usize) -> Result<()> {
         self.core.new_request(slot_index);
         let slot = &mut self.slots[slot_index];
         slot.capture = None;
@@ -519,7 +516,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
+    fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
         #[cfg(feature = "downloading")]
         if let Some((id, job)) = &self.slots[slot_index].download_job {
             let id = *id;
@@ -559,7 +556,7 @@ impl QuadPlayer {
         self.read_next_frame(slot_index, true)
     }
 
-    pub fn read_next_frame(&mut self, slot_index: usize, allow_refill: bool) -> Result<()> {
+    fn read_next_frame(&mut self, slot_index: usize, allow_refill: bool) -> Result<()> {
         let now = Instant::now();
 
         if self.slots[slot_index].capture.is_none() {
@@ -598,7 +595,7 @@ impl QuadPlayer {
         Ok(())
     }
 
-    pub fn compose_frame(&self) -> Result<Mat> {
+    fn compose_frame(&self) -> Result<Mat> {
         let infos: Vec<_> = self
             .slots
             .iter()
@@ -672,7 +669,7 @@ mod tests {
         }
         writer.release()?;
         let args = Args::parse_from(["qplay"]);
-        let mut player = QuadPlayer::new(args, vec![], 320, 240, Keybindings::default(), true)?;
+        let mut player = QuadPlayer::new(args, vec![], 320, 240, Keybindings::default())?;
         player.load_file_into_slot(0, path.clone())?;
         assert_eq!(player.core.slot(0).unwrap().position, 0);
         player.core.apply(Command::TogglePause).unwrap();
