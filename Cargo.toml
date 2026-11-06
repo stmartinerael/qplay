@@ -3,8 +3,12 @@ name = "qplay"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["scene-editing"]
+scene-editing = []
+
 [dependencies]
-opencv = "0.94"
+opencv = "0.101"
 clap = { version = "4.5", features = ["derive"] }
 rand = "0.8"
 walkdir = "2.5"
