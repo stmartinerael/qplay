@@ -182,8 +182,10 @@ impl QuadPlayer {
             let key = highgui::wait_key(20)?;
             if key != -1 {
                 let key_char = (key & 0xFF) as u8 as char;
-                if !self.handle_key(key_char)? {
-                    break;
+                match self.handle_key(key_char) {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(error) => eprintln!("Operation failed: {error:#}"),
                 }
             }
         }
@@ -334,7 +336,6 @@ impl QuadPlayer {
             self.slots[slot_index].download_job = Some(job);
         } else {
             // Treat as local file
-            self.release_slot(slot_index)?;
             self.load_file_into_slot(slot_index, PathBuf::from(url))?;
         }
         Ok(())
@@ -358,7 +359,7 @@ impl QuadPlayer {
         slot.scene_start_mark = None;
 
         if let Some(entry) = &slot.entry {
-            let mut data = load_scenes(&entry.path).unwrap_or_default();
+            let mut data = load_scenes(&entry.path)?;
             let tags: Vec<String> = tags_text
                 .split_whitespace()
                 .map(|s| s.to_string())
@@ -369,11 +370,8 @@ impl QuadPlayer {
                 tags,
             });
             let total_frames = slot.frame_count;
-            if let Err(e) = save_scenes(&entry.path, &data, total_frames) {
-                eprintln!("Error saving scene: {}", e);
-            } else {
-                println!("Scene saved.");
-            }
+            save_scenes(&entry.path, &data, total_frames)?;
+            println!("Scene saved.");
         }
         Ok(())
     }
@@ -384,7 +382,10 @@ impl QuadPlayer {
             let fps = slot.fps.max(1.0);
             let frames = (seconds * fps) as i32;
             let mut target = slot.frame_index + frames;
-            target = target.clamp(0, slot.frame_count - 1);
+            target = target.max(0);
+            if slot.frame_count > 0 {
+                target = target.min(slot.frame_count - 1);
+            }
             capture.set(videoio::CAP_PROP_POS_FRAMES, target as f64)?;
             slot.frame_index = target;
         }
@@ -493,7 +494,9 @@ impl QuadPlayer {
         let exclude = self.current_paths(Some(slot_index));
 
         for _ in 0..attempts {
-            let entry = self.pool.next_entry(&exclude);
+            let Some(entry) = self.pool.next_entry(&exclude) else {
+                anyhow::bail!("No video files available");
+            };
             if self.open_entry_in_slot(slot_index, entry, previous_frame.clone())? {
                 return Ok(());
             }
@@ -543,6 +546,9 @@ impl QuadPlayer {
             }
         }
 
+        if self.slots[slot_index].paused {
+            return Ok(());
+        }
         self.read_next_frame(slot_index, true)
     }
 

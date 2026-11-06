@@ -92,18 +92,22 @@ impl VideoPool {
         }
     }
 
-    pub fn next_entry(&mut self, exclude: &[PathBuf]) -> VideoEntry {
+    pub fn next_entry(&mut self, exclude: &[PathBuf]) -> Option<VideoEntry> {
         if self.queue.is_empty() {
             self.refill_queue();
         }
 
+        if self.queue.is_empty() {
+            return None;
+        }
+
         for i in 0..self.queue.len() {
             if !exclude.contains(&self.queue[i].path) || exclude.len() >= self.entries.len() {
-                return self.queue.remove(i);
+                return Some(self.queue.remove(i));
             }
         }
 
-        self.queue.remove(0)
+        Some(self.queue.remove(0))
     }
 
     pub fn reshuffle(&mut self) {
@@ -177,7 +181,7 @@ mod tests {
 
         // Test next_entry with exclusion
         let exclude = vec![PathBuf::from("a.mp4")];
-        let next = pool.next_entry(&exclude);
+        let next = pool.next_entry(&exclude).unwrap();
         assert_eq!(next.path, PathBuf::from("b.mp4"));
         assert_eq!(pool.queue.len(), 2);
 
@@ -191,7 +195,7 @@ mod tests {
         let _ = pool2.next_entry(&[]); // c
         assert!(pool2.queue.is_empty());
 
-        let next_refill = pool2.next_entry(&[]);
+        let next_refill = pool2.next_entry(&[]).unwrap();
         assert_eq!(next_refill.path, PathBuf::from("a.mp4"));
         assert_eq!(pool2.queue.len(), 2);
     }
@@ -204,9 +208,15 @@ mod tests {
             Some(1),
         );
         assert_eq!(
-            pool.next_entry(&[PathBuf::from("one.mp4")]).path,
+            pool.next_entry(&[PathBuf::from("one.mp4")]).unwrap().path,
             PathBuf::from("one.mp4")
         );
+    }
+
+    #[test]
+    fn empty_pool_returns_none() {
+        let mut pool = VideoPool::new(vec![], false, None);
+        assert!(pool.next_entry(&[]).is_none());
     }
 
     #[test]

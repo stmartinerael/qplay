@@ -71,17 +71,22 @@ pub fn resolve_dimensions(args: &Args) -> Result<(i32, i32)> {
     let default_width = 1280;
     let default_height = 720;
 
-    if args.fullscreen {
-        let display = detect_display_dimensions().unwrap_or((default_width, default_height));
-        let width = args.width.unwrap_or(display.0);
-        let height = args.height.unwrap_or(display.1);
-        return Ok((width, height));
+    let display = if args.fullscreen {
+        detect_display_dimensions().unwrap_or((default_width, default_height))
+    } else {
+        (default_width, default_height)
+    };
+    let dimensions = (
+        args.width.unwrap_or(display.0),
+        args.height.unwrap_or(display.1),
+    );
+    if dimensions.0 < 240 || dimensions.1 < 160 {
+        anyhow::bail!("Window dimensions must be at least 240x160");
     }
-
-    Ok((
-        args.width.unwrap_or(default_width),
-        args.height.unwrap_or(default_height),
-    ))
+    if !args.clip_seconds.is_finite() || args.clip_seconds < 0.0 {
+        anyhow::bail!("clip-seconds must be finite and non-negative");
+    }
+    Ok(dimensions)
 }
 
 /// Queries the X11 server via `xdpyinfo` to detect the current display resolution.
