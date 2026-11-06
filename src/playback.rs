@@ -1,4 +1,6 @@
 //! Playback calculations independent of input, windowing, and media backends.
+use crate::video::{VideoEntry, VideoPool};
+use rand::{Rng, SeedableRng};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,8 +14,9 @@ pub enum Command {
 }
 
 /// Playback decisions, independent of video decoding and windowing.
-#[derive(Debug, Default)]
 pub struct PlaybackCore {
+    pool: VideoPool,
+    rng: rand::rngs::StdRng,
     selected: usize,
     paused: bool,
     slots_paused: [bool; 4],
@@ -42,7 +45,59 @@ pub enum FrameAction {
     Replace,
 }
 
+impl Default for PlaybackCore {
+    fn default() -> Self {
+        Self::new(Vec::new(), false, None)
+    }
+}
+
 impl PlaybackCore {
+    pub fn new(entries: Vec<VideoEntry>, shuffle: bool, seed: Option<u64>) -> Self {
+        Self {
+            pool: VideoPool::new(entries, shuffle, seed),
+            rng: seed.map_or_else(
+                rand::rngs::StdRng::from_entropy,
+                rand::rngs::StdRng::seed_from_u64,
+            ),
+            selected: 0,
+            paused: false,
+            slots_paused: [false; 4],
+            slots: [None; 4],
+            identities: Default::default(),
+            requests: [0; 4],
+        }
+    }
+    pub fn reshuffle(&mut self) {
+        self.pool.reshuffle();
+    }
+    pub fn pool_size(&self) -> usize {
+        self.pool.total_entries()
+    }
+    pub fn next_entry(&mut self, index: usize) -> Option<VideoEntry> {
+        if index >= self.slots.len() {
+            return None;
+        }
+        let exclude: Vec<_> = self
+            .identities
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .filter_map(|(_, path)| path.clone())
+            .collect();
+        self.pool.next_entry(&exclude)
+    }
+    pub fn clip_bounds(&mut self, seconds: f64, fps: f64, frame_count: i32) -> (i32, Option<i32>) {
+        if seconds <= 0.0 {
+            return (0, None);
+        }
+        let frames = ((seconds * fps).round() as i32).max(1);
+        let start = if frame_count > frames {
+            self.rng.gen_range(0..=frame_count - frames)
+        } else {
+            0
+        };
+        (start, Some(start.saturating_add(frames)))
+    }
     pub fn apply(&mut self, command: Command) -> Result<(), &'static str> {
         match command {
             Command::Select(index) if index < self.slots_paused.len() => self.selected = index,
@@ -203,6 +258,26 @@ pub fn next_frame_time(now: Instant, previous: Option<Instant>, fps: f64) -> Ins
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_selection_excludes_other_slots_and_clip_bounds_are_reproducible() {
+        let entries = vec![VideoEntry::new("one".into()), VideoEntry::new("two".into())];
+        let mut a = PlaybackCore::new(entries.clone(), true, Some(42));
+        let mut b = PlaybackCore::new(entries, true, Some(42));
+        let now = Instant::now();
+        let first = a.next_entry(0).unwrap();
+        assert_eq!(first.path, b.next_entry(0).unwrap().path);
+        a.opened(0, 10.0, 100, (0, None), now, first.path.clone())
+            .unwrap();
+        assert_ne!(a.next_entry(1).unwrap().path, first.path);
+        for _ in 0..20 {
+            let bounds = a.clip_bounds(2.0, 10.0, 100);
+            assert_eq!(bounds, b.clip_bounds(2.0, 10.0, 100));
+            assert!(bounds.0 >= 0 && bounds.1.unwrap() <= 100);
+        }
+        assert_eq!(a.clip_bounds(0.0, 10.0, 100), (0, None));
+        assert!(a.next_entry(4).is_none());
+    }
 
     #[test]
     fn commands_preserve_slot_pause_across_global_pause() {

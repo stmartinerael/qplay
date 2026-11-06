@@ -8,10 +8,9 @@ use crate::playback::{Command, FrameAction, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{self, MosaicOptions, RenderOptions, SlotRenderInfo};
-use crate::video::{VideoEntry, VideoPool};
+use crate::video::VideoEntry;
 use anyhow::Result;
 use opencv::core::Mat;
-use rand::Rng;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -92,8 +91,6 @@ enum InputState {
 /// and the playback loop.
 pub struct QuadPlayer {
     args: Args,
-    pool: VideoPool,
-    rng: rand::rngs::StdRng,
     width: i32,
     height: i32,
     slots: Vec<SlotState>,
@@ -114,12 +111,7 @@ impl QuadPlayer {
         config: Keybindings,
     ) -> Result<Self> {
         let fullscreen = args.fullscreen;
-        let pool = VideoPool::new(entries, !args.no_shuffle, args.seed);
-        let rng = if let Some(s) = args.seed {
-            rand::SeedableRng::seed_from_u64(s)
-        } else {
-            rand::SeedableRng::from_entropy()
-        };
+        let core = PlaybackCore::new(entries, !args.no_shuffle, args.seed);
 
         let mut slots = Vec::with_capacity(4);
         for i in 0..4 {
@@ -128,12 +120,10 @@ impl QuadPlayer {
 
         Ok(Self {
             args,
-            pool,
-            rng,
             width,
             height,
             slots,
-            core: PlaybackCore::default(),
+            core,
             show_help: true,
             fullscreen,
             config,
@@ -295,7 +285,7 @@ impl QuadPlayer {
                     self.fill_slot(index)?;
                 }
             }
-            Some(Action::Reshuffle) => self.pool.reshuffle(),
+            Some(Action::Reshuffle) => self.core.reshuffle(),
             Some(Action::Help) => self.show_help = !self.show_help,
             Some(Action::Fullscreen) => {
                 self.fullscreen = !self.fullscreen;
@@ -394,19 +384,6 @@ impl QuadPlayer {
         Ok(())
     }
 
-    fn current_paths(&self, ignored_slot_index: Option<usize>) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        for i in 0..self.slots.len() {
-            if Some(i) == ignored_slot_index {
-                continue;
-            }
-            if let Some(path) = self.core.identity(i) {
-                paths.push(path.to_path_buf());
-            }
-        }
-        paths
-    }
-
     fn open_entry_in_slot(
         &mut self,
         slot_index: usize,
@@ -418,16 +395,10 @@ impl QuadPlayer {
         };
         let fps = capture.fps();
         let frame_count = capture.frame_count();
-        let mut clip_start_frame = 0;
-        let mut clip_end_frame = None;
-
+        let (clip_start_frame, clip_end_frame) =
+            self.core
+                .clip_bounds(self.args.clip_seconds, fps, frame_count);
         if self.args.clip_seconds > 0.0 {
-            let clip_frames = ((self.args.clip_seconds * fps).round() as i32).max(1);
-            if frame_count > clip_frames {
-                let max_start = (frame_count - clip_frames).max(0);
-                clip_start_frame = self.rng.gen_range(0..=max_start);
-            }
-            clip_end_frame = Some(clip_start_frame.saturating_add(clip_frames));
             capture.seek(clip_start_frame)?;
         }
 
@@ -484,11 +455,10 @@ impl QuadPlayer {
     /// Automatic playback replacement must not cancel a pending download.
     fn refill_slot(&mut self, slot_index: usize) -> Result<()> {
         let previous_frame = self.slots[slot_index].frame.clone();
-        let attempts = self.pool.total_entries().max(1);
-        let exclude = self.current_paths(Some(slot_index));
+        let attempts = self.core.pool_size().max(1);
 
         for _ in 0..attempts {
-            let Some(entry) = self.pool.next_entry(&exclude) else {
+            let Some(entry) = self.core.next_entry(slot_index) else {
                 anyhow::bail!("No video files available");
             };
             if self.open_entry_in_slot(slot_index, entry, previous_frame.clone())? {
@@ -701,7 +671,8 @@ mod tests {
             let program = dir.path().join("fake-downloader");
             std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n")?;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
-            player.pool = VideoPool::new(vec![VideoEntry::new(path.clone())], false, None);
+            player.core = PlaybackCore::new(vec![VideoEntry::new(path.clone())], false, None);
+            player.load_file_into_slot(0, path.clone())?;
             let id = player.core.new_request(0).unwrap();
             player.slots[0].download_job = Some((
                 id,
