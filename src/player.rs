@@ -656,3 +656,62 @@ impl Drop for QuadPlayer {
         let _ = self.close();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use opencv::{
+        core::{self, Scalar, Size},
+        prelude::*,
+        videoio,
+    };
+
+    #[test]
+    fn local_media_failed_replacement_preserves_display_and_paused_seek_updates_it() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("sample.avi");
+        let fourcc = videoio::VideoWriter::fourcc('M', 'J', 'P', 'G')?;
+        let mut writer = videoio::VideoWriter::new(
+            path.to_str().unwrap(),
+            fourcc,
+            10.0,
+            Size::new(32, 24),
+            true,
+        )?;
+        assert!(writer.is_opened()?);
+        for value in [10.0, 60.0, 110.0] {
+            let frame = Mat::new_rows_cols_with_default(24, 32, core::CV_8UC3, Scalar::all(value))?;
+            writer.write(&frame)?;
+        }
+        writer.release()?;
+        let args = Args::parse_from(["qplay"]);
+        let mut player = QuadPlayer::new(args, vec![], 320, 240, Keybindings::default(), true)?;
+        player.load_file_into_slot(0, path.clone())?;
+        assert_eq!(player.core.slot(0).unwrap().position, 0);
+        player.core.apply(Command::TogglePause).unwrap();
+        player.seek_slot(0, 0.2)?;
+        assert_eq!(player.core.slot(0).unwrap().position, 2);
+        let before = player.slots[0]
+            .frame
+            .as_ref()
+            .unwrap()
+            .at_2d::<core::Vec3b>(0, 0)?[0];
+        assert!(
+            player
+                .load_file_into_slot(0, dir.path().join("missing.avi"))
+                .is_err()
+        );
+        assert_eq!(player.core.slot(0).unwrap().position, 2);
+        assert_eq!(player.slots[0].entry.as_ref().unwrap().path, path);
+        assert_eq!(
+            player.slots[0]
+                .frame
+                .as_ref()
+                .unwrap()
+                .at_2d::<core::Vec3b>(0, 0)?[0],
+            before
+        );
+        Ok(())
+    }
+}
