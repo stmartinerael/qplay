@@ -64,6 +64,19 @@ pub fn translate(key: char, bindings: &Keybindings) -> Option<Action> {
 mod tests {
     use super::*;
     #[test]
+    fn scene_controls_follow_feature_flag() {
+        let keys = Keybindings::default();
+        assert_eq!(
+            translate(keys.mark_scene_start, &keys).is_some(),
+            cfg!(feature = "scene-editing")
+        );
+        assert_eq!(
+            translate(keys.mark_scene_stop, &keys).is_some(),
+            cfg!(feature = "scene-editing")
+        );
+    }
+
+    #[test]
     fn configured_keys_take_priority_over_fixed_actions() {
         let mut keys = Keybindings::default();
         assert_eq!(translate('!', &keys), Some(Action::Select(0)));

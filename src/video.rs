@@ -167,6 +167,11 @@ mod tests {
     }
 
     #[test]
+    fn discovery_reports_missing_directory() {
+        assert!(discover_videos(Path::new("/nonexistent/qplay-test-directory"), true).is_err());
+    }
+
+    #[test]
     fn test_video_pool_logic() {
         let entries = vec![
             VideoEntry::new(PathBuf::from("a.mp4")),

@@ -62,12 +62,10 @@ pub fn save_scenes(video_path: &Path, data: &SceneData, total_frames: i32) -> Re
 
 pub fn load_scenes(video_path: &Path) -> Result<SceneData> {
     let sidecar_path = get_sidecar_path(video_path);
-    if sidecar_path.exists() {
-        let contents = fs::read_to_string(&sidecar_path)?;
-        let data = serde_json::from_str(&contents)?;
-        Ok(data)
-    } else {
-        Ok(SceneData::default())
+    match fs::read_to_string(&sidecar_path) {
+        Ok(contents) => Ok(serde_json::from_str(&contents)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SceneData::default()),
+        Err(error) => Err(error.into()),
     }
 }
 
