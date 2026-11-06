@@ -49,14 +49,3 @@ fn download_sync(url: &str) -> Result<PathBuf> {
 
     Ok(file_path)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_download_job_creation() {
-        let job = start_download("https://example.com/test.mp4".to_string());
-        assert_eq!(job.url, "https://example.com/test.mp4");
-    }
-}

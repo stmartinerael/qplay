@@ -123,6 +123,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_preserves_explicit_inputs_and_controls() {
+        let args = Args::try_parse_from([
+            "qplay",
+            "a.mp4",
+            "b.mp4",
+            "--no-shuffle",
+            "--transition",
+            "cut",
+            "--clip-seconds",
+            "2.5",
+        ])
+        .unwrap();
+        assert_eq!(args.inputs, ["a.mp4", "b.mp4"]);
+        assert!(args.no_shuffle);
+        assert_eq!(args.transition, TransitionMode::Cut);
+        assert_eq!(args.clip_seconds, 2.5);
+    }
+
+    #[test]
     fn test_transition_mode_cycle() {
         assert_eq!(TransitionMode::Cut.next(), TransitionMode::Fade);
         assert_eq!(TransitionMode::Fade.next(), TransitionMode::Cut);

@@ -197,6 +197,19 @@ mod tests {
     }
 
     #[test]
+    fn selection_repeats_when_every_entry_is_excluded() {
+        let mut pool = VideoPool::new(
+            vec![VideoEntry::new(PathBuf::from("one.mp4"))],
+            false,
+            Some(1),
+        );
+        assert_eq!(
+            pool.next_entry(&[PathBuf::from("one.mp4")]).path,
+            PathBuf::from("one.mp4")
+        );
+    }
+
+    #[test]
     fn test_video_pool_shuffle() {
         let entries = (0..10)
             .map(|i| VideoEntry::new(PathBuf::from(format!("{}.mp4", i))))
