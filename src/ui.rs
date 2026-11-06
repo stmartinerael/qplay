@@ -44,6 +44,76 @@ pub struct RenderOptions {
     pub transition_ms: u64,
 }
 
+/// Layout and input prompt for the mosaic renderer.
+pub struct MosaicOptions<'a> {
+    pub width: i32,
+    pub height: i32,
+    pub prompt: Option<(&'a str, &'a str)>,
+}
+
+pub fn compose_mosaic(
+    slots: &[SlotRenderInfo<'_>],
+    options: &[RenderOptions],
+    layout: MosaicOptions<'_>,
+) -> Result<Mat> {
+    anyhow::ensure!(
+        slots.len() == 4 && options.len() == 4,
+        "a mosaic requires four slots"
+    );
+    let MosaicOptions {
+        width,
+        height,
+        prompt,
+    } = layout;
+    let tile_width = width / 2;
+    let tile_height = height / 2;
+    let mut canvas = Mat::new_rows_cols_with_default(height, width, core::CV_8UC3, Dracula::BG)?;
+    for (i, (info, opts)) in slots.iter().zip(options).enumerate() {
+        let x = if i % 2 == 0 { 0 } else { tile_width };
+        let y = if i < 2 { 0 } else { tile_height };
+        let tile = render_slot(info, tile_width, tile_height, *opts)?;
+        let mut dest = Mat::roi_mut(&mut canvas, Rect::new(x, y, tile_width, tile_height))?;
+        tile.copy_to(&mut dest)?;
+    }
+    imgproc::line(
+        &mut canvas,
+        Point::new(tile_width, 0),
+        Point::new(tile_width, height),
+        Dracula::DIVIDER,
+        2,
+        imgproc::LINE_8,
+        0,
+    )?;
+    imgproc::line(
+        &mut canvas,
+        Point::new(0, tile_height),
+        Point::new(width, tile_height),
+        Dracula::DIVIDER,
+        2,
+        imgproc::LINE_8,
+        0,
+    )?;
+    if let Some((label, text)) = prompt {
+        imgproc::rectangle(
+            &mut canvas,
+            Rect::new(0, height - 44, width, 44),
+            Dracula::OVERLAY,
+            -1,
+            imgproc::LINE_8,
+            0,
+        )?;
+        put_text(
+            &mut canvas,
+            &format!("{label}: {text}"),
+            Point::new(12, height - 16),
+            0.55,
+            Dracula::TEXT,
+            1,
+        )?;
+    }
+    Ok(canvas)
+}
+
 /// Renders the UI overlay and final frame for a single mosaic slot.
 pub fn render_slot(
     info: &SlotRenderInfo,

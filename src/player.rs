@@ -7,14 +7,10 @@ use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, FrameAction, PlaybackCore};
 #[cfg(feature = "scene-editing")]
 use crate::scenes::{Scene, load_scenes, save_scenes};
-use crate::ui::{Dracula, RenderOptions, SlotRenderInfo, put_text, render_slot};
+use crate::ui::{self, MosaicOptions, RenderOptions, SlotRenderInfo};
 use crate::video::{VideoEntry, VideoPool};
 use anyhow::Result;
-use opencv::{
-    core::{self, Mat, Point, Rect},
-    highgui, imgproc,
-    prelude::*,
-};
+use opencv::{core::Mat, highgui};
 use rand::Rng;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -624,84 +620,34 @@ impl QuadPlayer {
     }
 
     pub fn compose_frame(&self) -> Result<Mat> {
-        let start = Instant::now();
-        let tile_width = self.width / 2;
-        let tile_height = self.height / 2;
-        let mut canvas =
-            Mat::new_rows_cols_with_default(self.height, self.width, core::CV_8UC3, Dracula::BG)?;
-
-        for i in 0..4 {
-            let y0 = if i < 2 { 0 } else { tile_height };
-            let x0 = if i % 2 == 0 { 0 } else { tile_width };
-
-            let render_info =
-                self.slots[i].to_render_info(self.core.slot(i).map_or(0, |slot| slot.position));
-            let tile = render_slot(
-                &render_info,
-                tile_width,
-                tile_height,
-                RenderOptions {
-                    show_help: self.show_help,
-                    paused: self.core.slot_paused(i).unwrap_or(true),
-                    fullscreen: self.fullscreen,
-                    transition: self.args.transition,
-                    transition_ms: self.args.transition_ms,
-                },
-            )?;
-
-            let roi = Rect::new(x0, y0, tile_width, tile_height);
-            let mut dest = Mat::roi_mut(&mut canvas, roi)?;
-            tile.copy_to(&mut dest)?;
-        }
-
-        imgproc::line(
-            &mut canvas,
-            Point::new(tile_width, 0),
-            Point::new(tile_width, self.height),
-            Dracula::DIVIDER,
-            2,
-            imgproc::LINE_8,
-            0,
-        )?;
-        imgproc::line(
-            &mut canvas,
-            Point::new(0, tile_height),
-            Point::new(self.width, tile_height),
-            Dracula::DIVIDER,
-            2,
-            imgproc::LINE_8,
-            0,
-        )?;
-
-        if let Some(input) = &self.input_state {
-            let (prompt, text) = match input {
-                InputState::UrlInput { text } => ("Path or URL", text),
-                InputState::TagInput { text, .. } => ("Scene tags", text),
-            };
-            imgproc::rectangle(
-                &mut canvas,
-                Rect::new(0, self.height - 44, self.width, 44),
-                Dracula::OVERLAY,
-                -1,
-                imgproc::LINE_8,
-                0,
-            )?;
-            put_text(
-                &mut canvas,
-                &format!("{prompt}: {text}"),
-                Point::new(12, self.height - 16),
-                0.55,
-                Dracula::TEXT,
-                1,
-            )?;
-        }
-
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_millis(16) {
-            println!("WARN: compose_frame took {:?}", elapsed);
-        }
-
-        Ok(canvas)
+        let infos: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| slot.to_render_info(self.core.slot(i).map_or(0, |slot| slot.position)))
+            .collect();
+        let options: Vec<_> = (0..4)
+            .map(|i| RenderOptions {
+                show_help: self.show_help,
+                paused: self.core.slot_paused(i).unwrap_or(true),
+                fullscreen: self.fullscreen,
+                transition: self.args.transition,
+                transition_ms: self.args.transition_ms,
+            })
+            .collect();
+        let prompt = self.input_state.as_ref().map(|input| match input {
+            InputState::UrlInput { text } => ("Path or URL", text.as_str()),
+            InputState::TagInput { text, .. } => ("Scene tags", text.as_str()),
+        });
+        ui::compose_mosaic(
+            &infos,
+            &options,
+            MosaicOptions {
+                width: self.width,
+                height: self.height,
+                prompt,
+            },
+        )
     }
 }
 
