@@ -1,5 +1,6 @@
 use crate::cli::{Args, TransitionMode};
 use crate::config::Keybindings;
+use crate::controls::{self, Action};
 use crate::downloader::{self, DownloadJob, DownloadedFile};
 use crate::playback::{Command, PlaybackCore};
 use crate::scenes::{Scene, load_scenes, save_scenes};
@@ -256,65 +257,41 @@ impl QuadPlayer {
             return Ok(true);
         }
 
-        if key == self.config.select_slot_1 {
-            self.core.apply(Command::Select(0)).expect("valid slot");
-            return Ok(true);
-        }
-        if key == self.config.select_slot_2 {
-            self.core.apply(Command::Select(1)).expect("valid slot");
-            return Ok(true);
-        }
-        if key == self.config.select_slot_3 {
-            self.core.apply(Command::Select(2)).expect("valid slot");
-            return Ok(true);
-        }
-        if key == self.config.select_slot_4 {
-            self.core.apply(Command::Select(3)).expect("valid slot");
-            return Ok(true);
-        }
-        if key == self.config.pause_active {
-            self.core
-                .apply(Command::ToggleSelectedPause)
-                .expect("valid command");
-            return Ok(true);
-        }
-        if key == self.config.seek_forward_active {
-            self.seek_slot(self.core.selected(), 5.0)?;
-            return Ok(true);
-        }
-        if key == self.config.seek_backward_active {
-            self.seek_slot(self.core.selected(), -5.0)?;
-            return Ok(true);
-        }
-        if key == self.config.load_video {
-            self.input_state = Some(InputState::UrlInput {
-                text: String::new(),
-            });
-            return Ok(true);
-        }
-        if key == self.config.mark_scene_start {
-            let slot = &mut self.slots[self.core.selected()];
-            slot.scene_start_mark = Some(slot.frame_index);
-            return Ok(true);
-        }
-        if key == self.config.mark_scene_stop {
-            let was_paused = self
+        match controls::translate(key, &self.config) {
+            Some(Action::Select(index)) => {
+                self.core.apply(Command::Select(index)).expect("valid slot")
+            }
+            Some(Action::ToggleSlotPause) => self
                 .core
-                .individually_paused(self.core.selected())
-                .unwrap_or(false);
-            self.core
-                .apply(Command::SetSelectedPause(true))
-                .expect("valid command");
-            self.input_state = Some(InputState::TagInput {
-                text: String::new(),
-                was_paused,
-            });
-            return Ok(true);
-        }
-
-        match key {
-            'q' | '\u{1b}' => return Ok(false),
-            ' ' => {
+                .apply(Command::ToggleSelectedPause)
+                .expect("valid command"),
+            Some(Action::Seek(seconds)) => {
+                self.seek_slot(self.core.selected(), f64::from(seconds))?
+            }
+            Some(Action::Load) => {
+                self.input_state = Some(InputState::UrlInput {
+                    text: String::new(),
+                })
+            }
+            Some(Action::SceneStart) => {
+                let slot = &mut self.slots[self.core.selected()];
+                slot.scene_start_mark = Some(slot.frame_index);
+            }
+            Some(Action::SceneStop) => {
+                let was_paused = self
+                    .core
+                    .individually_paused(self.core.selected())
+                    .unwrap_or(false);
+                self.core
+                    .apply(Command::SetSelectedPause(true))
+                    .expect("valid command");
+                self.input_state = Some(InputState::TagInput {
+                    text: String::new(),
+                    was_paused,
+                });
+            }
+            Some(Action::Quit) => return Ok(false),
+            Some(Action::TogglePause) => {
                 self.core
                     .apply(Command::TogglePause)
                     .expect("valid command");
@@ -325,29 +302,20 @@ impl QuadPlayer {
                     }
                 }
             }
-            '1'..='4' => {
-                let idx = key.to_digit(10).unwrap() as usize - 1;
-                self.fill_slot(idx)?;
-            }
-            'c' => {
-                for i in 0..4 {
-                    self.fill_slot(i)?;
+            Some(Action::Replace(index)) => self.fill_slot(index)?,
+            Some(Action::ReplaceAll) => {
+                for index in 0..4 {
+                    self.fill_slot(index)?;
                 }
             }
-            'r' => {
-                self.pool.reshuffle();
-            }
-            'h' => {
-                self.show_help = !self.show_help;
-            }
-            'f' => {
+            Some(Action::Reshuffle) => self.pool.reshuffle(),
+            Some(Action::Help) => self.show_help = !self.show_help,
+            Some(Action::Fullscreen) => {
                 self.fullscreen = !self.fullscreen;
                 self.apply_window_mode()?;
             }
-            't' => {
-                self.args.transition = self.args.transition.next();
-            }
-            _ => {}
+            Some(Action::Transition) => self.args.transition = self.args.transition.next(),
+            None => {}
         }
         Ok(true)
     }
