@@ -12,9 +12,9 @@ cargo run -- video1.mp4 video2.mp4 --no-shuffle
 cargo run -- --help
 ```
 
-The default window is 1280×720. `--width` and `--height` must be at least 240 and 160 respectively. Use `--fullscreen`, `--clip-seconds`, `--seed`, `--transition cut|fade`, and `--transition-ms` to adjust playback. `--clip-seconds` must be finite and non-negative. URL downloads require `yt-dlp` on PATH. Existing playback continues during a download. Replacing a pending download cancels it; downloaded temporary files are removed when replaced or when qplay closes.
+The default window is 1280×720. `--width` and `--height` must be at least 240 and 160 respectively. Use `--fullscreen`, `--clip-seconds`, `--seed`, `--transition cut|fade`, and `--transition-ms` to adjust playback. `--clip-seconds` must be finite and non-negative.
 
-Both optional services are enabled by default. Build local-only playback with `cargo build --no-default-features`, or enable either service individually with `--features downloading` or `--features scene-editing`. Local path loading remains available without downloading; URL input reports an error. Scene marking keys are inactive without scene editing.
+Scene editing is enabled by default. Build playback without scene editing with `cargo build --no-default-features`, or enable it explicitly with `--features scene-editing`. Scene marking keys are inactive without scene editing. qplay opens local files only; download remote videos separately before loading them.
 
 ## Controls
 
@@ -26,7 +26,7 @@ Both optional services are enabled by default. Build local-only playback with `c
 | !, @, #, $ | Select a slot |
 | k | Pause the selected slot |
 | , / . | Seek the selected slot backward / forward five seconds |
-| l | Enter a local path or URL; Enter submits, Esc cancels |
+| l | Enter a local path; Enter submits, Esc cancels |
 | [ / ] | Mark scene start / end; enter tags after the end mark |
 | c / r | Replace all slots / reshuffle |
 | t / f / h | Change transition / fullscreen / help |
@@ -35,4 +35,4 @@ Customizable keys are stored in the platform configuration directory under `qpla
 
 ## Development
 
-Run `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`, and `cargo test --no-default-features`. Test each optional feature with `cargo test --no-default-features --features downloading` and `cargo test --no-default-features --features scene-editing`. The module boundaries and operation contracts are described in [docs/module-contracts.md](docs/module-contracts.md). Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.
+Run `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`, and `cargo test --no-default-features`. The module boundaries and operation contracts are described in [docs/module-contracts.md](docs/module-contracts.md). Develop on a feature or bugfix branch and commit tested stages. The supplied `.githooks/pre-commit` runs rustfmt on staged Rust files when configured as the Git hooks path.
