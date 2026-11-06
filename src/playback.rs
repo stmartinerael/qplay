@@ -19,6 +19,7 @@ pub struct PlaybackCore {
     slots_paused: [bool; 4],
     slots: [Option<SlotSnapshot>; 4],
     identities: [Option<PathBuf>; 4],
+    requests: [u64; 4],
 }
 
 /// Read-only metadata for the frame currently displayed by a slot.
@@ -90,6 +91,17 @@ impl PlaybackCore {
             transition_started_at: None,
         });
         Ok(())
+    }
+    /// Invalidate earlier asynchronous requests for this slot.
+    pub fn new_request(&mut self, index: usize) -> Option<u64> {
+        let id = self.requests.get_mut(index)?;
+        *id = id.checked_add(1).expect("request identity exhausted");
+        Some(*id)
+    }
+    pub fn request_is_current(&self, index: usize, id: u64) -> bool {
+        self.requests
+            .get(index)
+            .is_some_and(|current| *current == id)
     }
     pub fn identity(&self, index: usize) -> Option<&Path> {
         self.identities.get(index).and_then(Option::as_deref)
@@ -204,6 +216,18 @@ mod tests {
         assert_eq!(core.slot_paused(2), Some(true));
         assert!(core.apply(Command::Select(4)).is_err());
         assert_eq!(core.selected(), 2);
+    }
+
+    #[test]
+    fn request_id_rejects_stale_completions_per_slot() {
+        let mut core = PlaybackCore::default();
+        let first = core.new_request(0).unwrap();
+        let other = core.new_request(1).unwrap();
+        let second = core.new_request(0).unwrap();
+        assert!(!core.request_is_current(0, first));
+        assert!(core.request_is_current(0, second));
+        assert!(core.request_is_current(1, other));
+        assert!(!core.request_is_current(4, second));
     }
 
     #[test]

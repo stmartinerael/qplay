@@ -22,7 +22,7 @@ pub struct SlotState {
     pub frame: Option<Mat>,
     pub transition_from: Option<Mat>,
     #[cfg(feature = "downloading")]
-    pub download_job: Option<DownloadJob>,
+    download_job: Option<(u64, DownloadJob)>,
     #[cfg(feature = "downloading")]
     downloaded_file: Option<DownloadedFile>,
     error: Option<String>,
@@ -314,8 +314,9 @@ impl QuadPlayer {
         if url.starts_with("http://") || url.starts_with("https://") {
             #[cfg(feature = "downloading")]
             {
+                let id = self.core.new_request(slot_index).expect("valid slot");
                 let job = downloader::start_download(url);
-                self.slots[slot_index].download_job = Some(job);
+                self.slots[slot_index].download_job = Some((id, job));
                 self.slots[slot_index].error = None;
             }
             #[cfg(not(feature = "downloading"))]
@@ -328,6 +329,7 @@ impl QuadPlayer {
     }
 
     pub fn load_file_into_slot(&mut self, slot_index: usize, path: PathBuf) -> Result<()> {
+        self.core.new_request(slot_index);
         #[cfg(feature = "downloading")]
         {
             self.slots[slot_index].download_job = None;
@@ -491,6 +493,7 @@ impl QuadPlayer {
     }
 
     pub fn fill_slot(&mut self, slot_index: usize) -> Result<()> {
+        self.core.new_request(slot_index);
         #[cfg(feature = "downloading")]
         {
             self.slots[slot_index].download_job = None;
@@ -517,6 +520,7 @@ impl QuadPlayer {
     }
 
     pub fn release_slot(&mut self, slot_index: usize) -> Result<()> {
+        self.core.new_request(slot_index);
         let slot = &mut self.slots[slot_index];
         slot.capture = None;
         slot.frame = None;
@@ -534,15 +538,22 @@ impl QuadPlayer {
 
     pub fn advance_slot(&mut self, slot_index: usize) -> Result<()> {
         #[cfg(feature = "downloading")]
-        if let Some(job) = &self.slots[slot_index].download_job {
+        if let Some((id, job)) = &self.slots[slot_index].download_job {
+            let id = *id;
             match job.poll() {
                 Ok(Some(file)) => {
                     #[cfg(feature = "downloading")]
                     {
                         self.slots[slot_index].download_job = None;
                     }
-                    let path = file.path().to_owned();
-                    self.load_file_into_slot(slot_index, path)?;
+                    if !self.core.request_is_current(slot_index, id) {
+                        return Ok(());
+                    }
+                    let entry = VideoEntry::new(file.path().to_owned());
+                    let previous = self.slots[slot_index].frame.clone();
+                    if !self.open_entry_in_slot(slot_index, entry, previous)? {
+                        anyhow::bail!("Could not open downloaded file");
+                    }
                     self.slots[slot_index].downloaded_file = Some(file);
                 }
                 Ok(None) => {}
@@ -711,14 +722,36 @@ mod tests {
             std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n")?;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
             player.pool = VideoPool::new(vec![VideoEntry::new(path.clone())], false, None);
-            player.slots[0].download_job = Some(crate::downloader::start_with(
-                "https://example.invalid".into(),
-                program,
+            let id = player.core.new_request(0).unwrap();
+            player.slots[0].download_job = Some((
+                id,
+                crate::downloader::start_with("https://example.invalid".into(), program),
             ));
             player.refill_slot(0)?;
             assert!(player.slots[0].download_job.is_some());
             player.fill_slot(0)?;
             assert!(player.slots[0].download_job.is_none());
+
+            let completed = dir.path().join("completed-downloader");
+            std::fs::write(
+                &completed,
+                format!("#!/bin/sh\ncp '{}' \"$4\"\n", path.display()),
+            )?;
+            std::fs::set_permissions(&completed, std::fs::Permissions::from_mode(0o700))?;
+            let stale_id = player.core.new_request(0).unwrap();
+            player.slots[0].download_job = Some((
+                stale_id,
+                crate::downloader::start_with("https://example.invalid".into(), completed),
+            ));
+            player.core.new_request(0);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while player.slots[0].download_job.is_some() && Instant::now() < deadline {
+                player.advance_slot(0)?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(player.slots[0].download_job.is_none());
+            assert_eq!(player.core.identity(0), Some(path.as_path()));
+            assert!(player.slots[0].downloaded_file.is_none());
         }
 
         Ok(())
