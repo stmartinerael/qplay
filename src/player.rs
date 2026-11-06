@@ -424,7 +424,7 @@ impl QuadPlayer {
         if self.args.clip_seconds > 0.0 {
             let clip_frames = ((self.args.clip_seconds * fps).round() as i32).max(1);
             if frame_count > clip_frames {
-                let max_start = (frame_count - clip_frames - 1).max(0);
+                let max_start = (frame_count - clip_frames).max(0);
                 clip_start_frame = self.rng.gen_range(0..=max_start);
             }
             clip_end_frame = Some(clip_start_frame.saturating_add(clip_frames));

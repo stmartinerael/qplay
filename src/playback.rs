@@ -87,7 +87,7 @@ impl PlaybackCore {
             position: start,
             clip_start: start,
             clip_end: end,
-            next_frame_at: now,
+            next_frame_at: next_frame_time(now, None, fps),
             transition_started_at: None,
         });
         Ok(())
@@ -252,12 +252,14 @@ mod tests {
         );
         assert_eq!(core.slot(0), original);
         assert_eq!(core.identity(0), Some(Path::new("one")));
-        assert_eq!(core.frame_action(0, now), FrameAction::Read);
-        core.frame_read(0, now);
+        assert_eq!(core.frame_action(0, now), FrameAction::Wait);
+        let first_due = now + Duration::from_millis(100);
+        assert_eq!(core.frame_action(0, first_due), FrameAction::Read);
+        core.frame_read(0, first_due);
         assert_eq!(core.slot(0).unwrap().position, 5);
         assert_eq!(core.frame_action(0, now), FrameAction::Wait);
         assert_eq!(
-            core.frame_action(0, now + Duration::from_millis(100)),
+            core.frame_action(0, now + Duration::from_millis(200)),
             FrameAction::Replace
         );
         core.apply(Command::TogglePause).unwrap();
