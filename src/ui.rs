@@ -2,10 +2,53 @@ use crate::cli::TransitionMode;
 use anyhow::{Context, Result};
 use opencv::{
     core::{self, Mat, Point, Rect, Scalar, Size},
-    imgproc,
+    highgui, imgproc,
     prelude::*,
 };
 use std::time::{Duration, Instant};
+
+/// Owns the OpenCV window and its lifecycle.
+pub struct Window {
+    name: String,
+    width: i32,
+    height: i32,
+}
+impl Window {
+    pub fn open(name: &str, width: i32, height: i32, fullscreen: bool) -> Result<Self> {
+        highgui::named_window(name, highgui::WINDOW_NORMAL)?;
+        let window = Self {
+            name: name.into(),
+            width,
+            height,
+        };
+        window.set_fullscreen(fullscreen)?;
+        Ok(window)
+    }
+    pub fn set_fullscreen(&self, fullscreen: bool) -> Result<()> {
+        let mode = if fullscreen {
+            highgui::WINDOW_FULLSCREEN
+        } else {
+            highgui::WINDOW_NORMAL
+        };
+        highgui::set_window_property(&self.name, highgui::WND_PROP_FULLSCREEN, f64::from(mode))?;
+        if !fullscreen {
+            highgui::resize_window(&self.name, self.width, self.height)?;
+        }
+        Ok(())
+    }
+    pub fn show(&self, frame: &Mat) -> Result<()> {
+        highgui::imshow(&self.name, frame)?;
+        Ok(())
+    }
+    pub fn key(&self, delay_ms: i32) -> Result<i32> {
+        Ok(highgui::wait_key(delay_ms)?)
+    }
+}
+impl Drop for Window {
+    fn drop(&mut self) {
+        let _ = highgui::destroy_window(&self.name);
+    }
+}
 
 /// Custom theme constants for BGR colors used in overlays and UI elements,
 /// inspired by the Dracula color palette.

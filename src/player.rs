@@ -10,7 +10,7 @@ use crate::scenes::{Scene, load_scenes, save_scenes};
 use crate::ui::{self, MosaicOptions, RenderOptions, SlotRenderInfo};
 use crate::video::{VideoEntry, VideoPool};
 use anyhow::Result;
-use opencv::{core::Mat, highgui};
+use opencv::core::Mat;
 use rand::Rng;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -103,7 +103,6 @@ pub enum InputState {
 /// and the playback loop.
 pub struct QuadPlayer {
     pub args: Args,
-    pub window_name: String,
     pub pool: VideoPool,
     pub rng: rand::rngs::StdRng,
     pub width: i32,
@@ -115,7 +114,7 @@ pub struct QuadPlayer {
     pub config: Keybindings,
     pub input_state: Option<InputState>,
     pub explicit_mode: bool,
-    window_opened: bool,
+    window: Option<ui::Window>,
 }
 
 impl QuadPlayer {
@@ -142,7 +141,6 @@ impl QuadPlayer {
 
         Ok(Self {
             args,
-            window_name: "quadplay".to_string(),
             pool,
             rng,
             width,
@@ -154,18 +152,23 @@ impl QuadPlayer {
             config,
             input_state: None,
             explicit_mode,
-            window_opened: false,
+            window: None,
         })
     }
 
     pub fn run(&mut self) -> Result<()> {
-        highgui::named_window(&self.window_name, highgui::WINDOW_NORMAL)?;
-        highgui::resize_window(&self.window_name, self.width, self.height)?;
-        self.window_opened = true;
-        self.apply_window_mode()?;
+        self.window = Some(ui::Window::open(
+            "quadplay",
+            self.width,
+            self.height,
+            self.fullscreen,
+        )?);
 
         for i in 0..4 {
-            self.fill_slot(i)?;
+            if let Err(error) = self.fill_slot(i) {
+                eprintln!("Slot {}: {error:#}", i + 1);
+                self.slots[i].error = Some(format!("ERROR: {error}"));
+            }
         }
 
         loop {
@@ -178,14 +181,14 @@ impl QuadPlayer {
             }
 
             let mosaic = self.compose_frame()?;
-            highgui::imshow(&self.window_name, &mosaic)?;
+            self.window.as_ref().unwrap().show(&mosaic)?;
 
             let elapsed = start.elapsed();
             if elapsed > Duration::from_millis(20) {
                 println!("WARN: Loop tick took {:?}", elapsed);
             }
 
-            let key = highgui::wait_key(20)?;
+            let key = self.window.as_ref().unwrap().key(20)?;
             if key != -1 {
                 let key_char = (key & 0xFF) as u8 as char;
                 match self.handle_key(key_char) {
@@ -207,10 +210,7 @@ impl QuadPlayer {
         for i in 0..self.slots.len() {
             let _ = self.release_slot(i);
         }
-        if self.window_opened {
-            let _ = highgui::destroy_window(&self.window_name);
-            self.window_opened = false;
-        }
+        self.window = None;
         Ok(())
     }
 
@@ -417,15 +417,8 @@ impl QuadPlayer {
     }
 
     pub fn apply_window_mode(&self) -> Result<()> {
-        let mode = if self.fullscreen {
-            highgui::WINDOW_FULLSCREEN as f64
-        } else {
-            highgui::WINDOW_NORMAL as f64
-        };
-
-        highgui::set_window_property(&self.window_name, highgui::WND_PROP_FULLSCREEN, mode)?;
-        if !self.fullscreen {
-            highgui::resize_window(&self.window_name, self.width, self.height)?;
+        if let Some(window) = &self.window {
+            window.set_fullscreen(self.fullscreen)?;
         }
         Ok(())
     }
@@ -574,6 +567,9 @@ impl QuadPlayer {
             }
         }
 
+        if self.slots[slot_index].capture.is_none() && self.slots[slot_index].error.is_some() {
+            return Ok(());
+        }
         if self.core.slot_paused(slot_index).unwrap_or(true) {
             return Ok(());
         }
